@@ -1,21 +1,27 @@
-# hack-509d7f64-latex
+# Voice Router — classifier layer
 
-Hackathon team repository for Latex
+Go implementation of **layer 2** of the voice assistant. It accepts normalized
+Russian, Kazakh, or mixed-language text from layer 1, identifies a scenario with
+the OpenAI API, optionally asks a user or operator to review that intent, executes
+the scenario's tools, and saves the answer before returning it to layer 3.
+Speech recognition, normalization, TTS, and the operator frontend are separate.
 
-Voice Router: Market and MVP Architecture Analysis
-Executive summary
+The Go module and commands live in `backend/`. The fixed 40 scenarios, three
+system intents, slot definitions, knowledge base, and initial synthetic business
+records come from `voice_router_dataset/`. Scenarios remain hardcoded; there is
+no scenario-editing API and no classifier trained on the evaluation labels.
 
-The proposed Voice Router is not only a voice bot. Its main product is a decision layer between speech recognition and business scenarios. That layer must understand the full conversation, choose one or more scenarios, keep state when the user changes topic, support Russian–Kazakh mixed speech, and make a decision fast enough that the call still feels natural. The hackathon brief asks for 40 scenarios, conversations up to 10 turns, a roughly 500 ms routing target, no more than roughly 1.5 seconds from the end of speech to the start of the reply, and a supervisor trace showing the selected scenario, alternatives, reason, and latency.
+## Run
 
 3 main layers:
 S2T -> normalize (Ayat)
-Classfier -> in memory key value -> scenario tools -> tools (Sanzhar)
+Classfier -> PostgreSQL-backed state -> scenario tools -> tools (Sanzhar)
 
-## Repository layout
+### Repository layout
 
 | Folder | What | Port |
 |---|---|---|
-| `backend/` | **Layer 2**: Go LLM router (OpenAI Responses API + Structured Outputs), synthetic backend, in-memory sessions | 8080 |
+| `backend/` | **Layer 2**: Go LLM router (OpenAI Responses API + Structured Outputs), synthetic backend, PostgreSQL-backed sessions | 8080 |
 | `stt/` | **Layer 1 input**: wav2vec2-CTC Kazakh/Russian STT (`alibiserikbay/kazakh-russian-mixed-stt`) + browser test console | 9100 |
 | `tts/` | **Layer 3 output**: Silero v5 (Russian) + ISSAI KazakhTTS (Kazakh), routed per sentence | 9101 |
 | `chat/` | **Voice Samurai** frontend + gateway: mic → STT → router → TTS, trace panel | 9102 |
@@ -29,7 +35,7 @@ browser ──ws──▶ chat gateway (:9102) ──▶ STT (:9100)            
                                      ──▶ TTS (:9101)              spoken reply ──▶ browser
 ```
 
-## Run everything with Docker
+### Run everything with Docker
 
 ```bash
 cp .env.example .env              # set OPENAI_API_KEY (the router exits without it; the chat then uses its keyword mock)
@@ -50,7 +56,7 @@ blocked from your network: either set `HF_TOKEN=hf_...` in `.env`, or download o
 To use a router running outside Docker: `ROUTER_URL=http://host.docker.internal:8080/v1/turns docker compose up -d`.
 With `API_TOKEN` set in `.env`, the router requires it as a bearer token and the chat sends it automatically.
 
-## Run locally (venvs, GPU)
+### Run locally (venvs, GPU)
 
 ```bash
 cd backend && OPENAI_API_KEY=sk-... go run ./cmd/router     # http://127.0.0.1:8080
@@ -61,45 +67,92 @@ scripts/speech_services.sh status | stop | logs
 First-time setup (venvs, weights) is described in `stt/README.md` and `tts/README.md`;
 the gateway and its router contract in `chat/README.md`.
 
-## Layer 2 implementation (Go)
+### Run the Go router
 
-`backend/` implements the **classifier/router layer**. It accepts
-normalized text from layer 1 and returns an answer plus a supervisor trace for
-layer 3. Speech recognition (`stt/`), TTS (`tts/`) and the frontend/gateway
-(`chat/`) live next to it in this repository and talk to it over HTTP.
-
-The “classifier” is an **OpenAI LLM router**, as required by the brief. It does
-not train an encoder intent classifier or map evaluation utterances to labels.
-The fixed 40 scenarios, three system intents, slot definitions, knowledge base,
-and synthetic backend are embedded into the Go binary from `voice_router_dataset/`
-(wired into `backend/go.mod` as a local module, so the same files also serve the
-Python services). The dataset remains the source of the hardcoded catalog; there
-is no scenario-editing endpoint.
-
-### Run
-
-Requires Go 1.25 or later and an OpenAI API key. There are no third-party Go
-dependencies and no database to install. From `backend/` in PowerShell
-(`docker compose up router` runs the same binary in a container on port 8080):
+Requires Go 1.25+, PostgreSQL (development baseline: 17), and an OpenAI API key.
+Create an empty `voice_router` database using your PostgreSQL installation, then
+run from the repository root in PowerShell:
 
 ```powershell
+cd backend
+$env:DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5432/voice_router?sslmode=disable"
+go run ./cmd/migrate
 $env:OPENAI_API_KEY = "your-key"
-$env:OPENAI_MODEL = "gpt-4.1-mini" # optional; choose a Responses/Structured Outputs model
+$env:OPENAI_MODEL = "gpt-4.1-mini" # optional
+$env:API_TOKEN = "your-user-client-token" # optional for local development
+$env:OPERATOR_API_TOKEN = "a-different-operator-token" # required for operator review
 go run ./cmd/router
 ```
 
-The server listens on `http://127.0.0.1:8080`. `LISTEN_ADDR` overrides the address;
-`API_TOKEN` enables bearer authentication on all endpoints except `/healthz`.
-`.env.example` documents the environment variables; `.env` files are **not**
-loaded automatically. Keys stay on the server and are never written to traces.
+Use your database credentials in `DATABASE_URL`. Migration creates the schema
+and seeds mock records once; re-running it preserves subsequent mutations.
+Server startup checks database connectivity and schema readiness and fails if
+migration is needed. There is no in-memory production fallback.
 
-To build a standalone binary:
+The default address is `http://127.0.0.1:8080`; set `LISTEN_ADDR` to override it.
+`backend/.env.example` lists the configuration. `.env` files are **not loaded
+automatically**. API credentials stay on the server. Build a binary with
+`go build -o voice-router.exe ./cmd/router` from `backend/`.
 
-```powershell
-go build -o voice-router.exe ./cmd/router
+## Logical components and durable execution
+
+```text
+Stable system prompt + PostgreSQL history + current input
+                         |
+                  Identify intent
+                         |
+             Automatic or human review
+                 /                 \
+             Rejected             Accepted
+                |                     |
+      Retrieve scenario details   Run allowed business tools
+                |                     |
+           Identify again         Generate answer
+                                      |
+                              Commit answer -> Return
 ```
 
-### Layer 1 → layer 2 contract
+The implementation separates these responsibilities:
+
+| Component | Responsibility |
+| --- | --- |
+| Repository | PostgreSQL sessions, turns, checkpoints, reviews, events, tool receipts, and mock business records. |
+| Context builder | Stable assistant instructions, last ten completed turns, active workflow, current input once, and ordered retrieval/review feedback. |
+| Intent policy | Validate structured routing output, confidence, language, scenarios, and extracted slots. |
+| Intent review | Persist a proposal revision, pause without an open HTTP request, and resume after approval or rejection. |
+| Tools | Retrieve hardcoded scenario details; execute only catalog-approved business actions. |
+| Coordinator | Advance persisted phases and enforce retry, concurrency, and processing limits. |
+| HTTP API | Connect layer 1 and the operator/user interface to that workflow. |
+
+“Model cache” means constructing each model request from durable conversation
+state. PostgreSQL owns the history. Requests use the OpenAI Responses API with
+structured output and `store: false`; provider-side conversation storage is not
+required. Repeated system-prompt prefixes may benefit from provider prompt
+caching, but application correctness does not depend on it.
+
+Confidence of at least 0.75 permits automatic acceptance. Lower confidence
+retrieves scenario details and retries once, then asks for clarification if still
+uncertain. Two consecutive user turns below 0.45 trigger a synthetic handoff.
+Urgent scenarios go first; other intents retain spoken order. Queued and
+suspended workflows preserve their own slots and action positions.
+
+Each input permits at most three intent proposals, 24 execution steps, and
+60 seconds of active processing; human waiting time is excluded. Counters and
+checkpoints survive restart. A PostgreSQL advisory lock serializes a session
+across server instances; short transactions commit changes between model calls.
+No transaction or connection remains held while waiting for human review.
+
+Mock mutations, their operation receipts, and workflow advancement commit
+together. Replaying a completed operation does not repeat its mutation. Final
+answers and session updates commit before a successful response. If PostgreSQL
+is unavailable, the API returns an error; retry the same request after recovery.
+Restart recovery is driven by resubmitting the original request or review.
+
+There is no one-hour session eviction or 100-turn lifetime limit. Full history
+is stored in PostgreSQL while model context remains bounded. Prior volatile
+sessions from the old in-memory implementation are not migrated.
+
+## Turn API
 
 `POST /v1/turns` accepts one JSON object:
 
@@ -110,181 +163,159 @@ go build -o voice-router.exe ./cmd/router
   "text": "Подскажите адрес офиса в Алматы",
   "language": "ru",
   "reply_language": "ru",
+  "review_mode": "auto",
   "slots": {"city": "Almaty"}
 }
 ```
 
-`session_id`, `request_id`, `text`, and `language` are required. Session and
-request IDs allow letters, digits, `_`, and `-` (up to 100 characters).
-`language` is `ru`, `kk`, or `mixed`. Optional `reply_language` is `ru` or `kk`;
-layer 1's explicit language takes precedence. For mixed input without a reply
-language, the LLM chooses the dominant language using conversation context.
-`slots` is optional: values already extracted by the normalizer override the
-router's extraction and must match `slots.json`. Integer slots use JSON numbers,
-list slots use JSON arrays, boolean slots use JSON booleans.
+`session_id`, `request_id`, `text`, and `language` are required. IDs allow
+letters, digits, `_`, and `-`, with at most 100 characters. `language` is `ru`,
+`kk`, or `mixed`; optional `reply_language` is `ru` or `kk`. The normalizer's
+explicit reply language takes precedence; otherwise the model chooses a reply
+language for mixed speech. Optional `slots` must match the catalog and override
+the initial model extraction. After a rejected proposal, newly extracted
+corrections take precedence over the original slots. Text is limited to 8,000
+bytes; JSON bodies to 64 KiB.
 
-Example request:
+`review_mode` is `auto` (default), `user`, or `operator`. Operator mode requires
+the server's `OPERATOR_API_TOKEN` to be configured. Intent review is separate
+from mandatory consent for irreversible business actions.
+System goodbye and out-of-scope replies, unclear-intent clarification, and an
+explicit operator-handoff request resolve without an intent-review pause.
 
-```powershell
-$body = @{
-  session_id = "call-001"
-  request_id = "turn-001"
-  text = "Подскажите адрес офиса в Алматы"
-  language = "ru"
-  slots = @{city = "Almaty"}
-} | ConvertTo-Json -Depth 8
-Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8080/v1/turns `
-  -ContentType "application/json; charset=utf-8" `
-  -Body ([Text.Encoding]::UTF8.GetBytes($body))
+Use the same session ID throughout the conversation and a new request ID for
+each user input. An identical completed request returns its saved response.
+Retrying a request awaiting intent review returns its current proposal. Retrying
+an interrupted request resumes its checkpoint. Reusing an ID with different
+input returns HTTP 409.
+
+Responses include `answer`, `language`, `status`, `active_scenario`,
+`pending_scenarios`, and `trace`. The trace includes the routing decision,
+alternatives, explanation, actions/results, and layer-2 timing. It does not
+measure speech recognition or TTS latency.
+
+| Status | Client action |
+| --- | --- |
+| `awaiting_intent_confirmation` | Display `review.question` and submit approval or rejection. |
+| `awaiting_slot` | Ask the returned question; submit the next user turn. |
+| `awaiting_confirmation` | Read the proposed business action; wait for explicit user consent. |
+| `clarification` | Ask the returned clarification question. |
+| `completed` | Present the answer; queued topics remain available. |
+| `cancelled` | The user declined the proposed business operation. |
+| `handoff` | A synthetic operator handoff was recorded with context. |
+
+## Intent review API
+
+A pending response includes `review` with `proposal_id`, `revision`, `target`,
+`question`, `decision`, and `status`. Submit feedback to
+`POST /v1/sessions/{session_id}/reviews`:
+
+```json
+{
+  "request_id": "review-001",
+  "turn_request_id": "turn-001",
+  "proposal_id": "copy-from-review-response",
+  "revision": 1,
+  "decision": "rejected",
+  "feedback": "I need the office opening hours, not its address."
+}
 ```
 
-When `API_TOKEN` is configured, add
-`-Headers @{Authorization = "Bearer $env:API_TOKEN"}` to requests.
+Use `approved` or `rejected` for `decision`. `feedback` is optional. Approval
+accepts exactly that proposal revision. Rejection stores feedback, retrieves
+scenario information, and identifies the intent again without executing the
+rejected scenario's business actions. Repeated rejection eventually asks for
+clarification rather than looping forever.
 
-Use the same session ID for the whole call and a **new request ID for each user
-turn**. Retrying identical input with the same request ID returns the stored
-answer without calling the LLM or repeating actions. Reusing that ID with
-different input returns HTTP 409. Unknown fields and invalid inputs return 400;
-full session capacity returns 503.
+The response has the same shape as the turn response and may contain a revised
+proposal. Stale proposals, mismatched reviewer credentials, or conflicting
+request reuse return 409. Identical review retries return the saved result.
+When a **user** review is pending, a clear yes/no in the next user turn can also
+resolve it; corrections become rejection feedback. Operator reviews use the
+review endpoint. A natural-language review reply updates the original turn, so
+its response retains the original `request_id`; poll using `turn_request_id`,
+not the feedback request ID.
 
-### Layer 2 → layer 3 contract
+Set `Authorization: Bearer <API_TOKEN>` for user clients, or
+`Authorization: Bearer <OPERATOR_API_TOKEN>` for operator clients. Both tokens
+can access protected endpoints, but only credentials matching a proposal's
+target can review it. Reviewer identity is never accepted in JSON. Tokens must
+differ. With `API_TOKEN` empty, unauthenticated local requests act as a user.
 
-The response includes `answer`, `language`, `status`, `active_scenario`,
-`pending_scenarios`, and `trace`. `answer` can be passed directly to TTS.
-`active_scenario` is present when a workflow still needs input. The selected
-scenario(s), confidence, explanation, extracted slots, and alternatives are
-always in `trace.decision` after successful routing, including completed turns.
+Irreversible actions still need their own preview and explicit Russian/Kazakh
+confirmation, such as `Да` or `Иә`, on a later user turn. Intent approval cannot
+provide that consent. Corrections invalidate action previews, and each
+irreversible action is confirmed separately.
 
-| Status | Meaning |
+## Other endpoints and failures
+
+| Endpoint | Result |
 | --- | --- |
-| `awaiting_slot` | Ask the supplied question and submit the next user turn. |
-| `awaiting_confirmation` | Read back the proposed operation; wait for explicit consent. |
-| `clarification` | Routing was ambiguous; ask the supplied clarification. |
-| `completed` | This scenario finished; pending topics remain available. |
-| `cancelled` | The client declined the proposed operation. |
-| `handoff` | A synthetic operator handoff record was created with conversation context. |
+| `GET /healthz` | Public process health; independent of the database and OpenAI. |
+| `GET /readyz` | Public database connectivity and schema readiness; 503 when unavailable. |
+| `GET /v1/scenarios` | Fixed scenario catalog and system intents. |
+| `GET /v1/sessions/{id}` | Current workflow and the last ten finished turns; older turns remain stored. |
+| `GET /v1/sessions/{id}/turns/{request_id}` | `{ "phase": "...", "output": { ... } }` from the latest committed checkpoint. |
 
-`trace.actions` contains action name, `preview`/`execute` mode, arguments, and
-results. `trace.latency_ms` measures routing, tools, response generation, and
-total **layer-2** time; it does not claim to measure STT/TTS or end-to-end voice
-latency. `trace.error` records provider/response failures without API secrets.
+The internal terminal turn phase is `finished`; `output.status` explains its
+user-facing outcome. Other phases include `received`, `identifying`,
+`retrieving`, `awaiting_intent_confirmation`, and `generating_answer`.
+An incomplete checkpoint may have no final answer yet.
 
-Other endpoints:
+HTTP 400 means invalid input or JSON, 401 invalid credentials, 404 missing state,
+409 a conflicting/stale request or busy session, and 503 unavailable persistence
+or interrupted processing. Retry transient failures using the same IDs. Stored
+events preserve model decisions, retrieval, review outcomes, tool operations,
+and workflow progression for diagnosis.
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /healthz` | Process health; does not call OpenAI. |
-| `GET /v1/scenarios` | Fixed scenario catalog for the operator frontend. |
-| `GET /v1/sessions/{session_id}` | Stored inputs, answers, decisions, tool results, active workflow, suspended topics, and queue. |
+## Synthetic backend
+
+All 31 catalog actions use the supplied mock business records and knowledge
+base. The fixture reference date is **2026-10-01**. Mutable mock records and ID
+allocation live in PostgreSQL, initially seeded from the dataset. A locked
+JSONB backend-state row provides transactional updates for this small dataset.
 
 The chat frontend displays the returned scenarios and trace (`chat/README.md`
 describes how the gateway maps them). Manual operator overrides and actual
 telephony transfers are outside this implementation.
 
-### Execution and state
+SMS, callbacks, payments, policies, medical bookings, and operator handoffs do
+not reach real services; synthetic creation results include `mock: true`.
+Phone/IIN lookup is demo identification, not production authentication. Known
+mock simplifications include Standard-only CASCO quotes, explicit supported
+travel destinations, one daily appointment slot per location, and synthetic
+renewal/update pricing. Model wording and routing accuracy require evaluation;
+this implementation does not claim the brief's latency target has been met.
 
-```text
-Normalized turn → save input → OpenAI structured routing → decision policy
-                                                        ↓
-                           identify → collect slots → execute allowed actions
-                                                        ↓
-                      confirmation / question / answer / operator handoff
-                                                        ↓
-                                    save answer → return to the caller
-```
+## Validation and evaluation
 
-The router receives scenario descriptions, boundary rules, examples, slot
-definitions, the active state, and the last ten turns. Strict JSON-schema output
-is validated again in Go. `dev_utterances.json` and its labels are never sent to
-the model. OpenAI is accessed through the standard-library HTTP client using
-the [Responses API and Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs).
-Requests use `store: false`; this is not a claim of zero provider retention.
-
-The executor controls tools in Go; model output cannot name arbitrary tools or
-write arbitrary storage keys. Confidence of at least 0.75 permits execution;
-lower confidence asks for clarification. Two consecutive scores below 0.45
-trigger a handoff. Urgent scenarios go first, other intents retain spoken order.
-The primary scenario is handled first and remaining scenarios are queued;
-the response offers to return to them on subsequent turns. Suspended scenarios
-retain their own slots and action position. An OGPO quote carries its parameters
-into a subsequent purchase.
-
-The execution loop stops only when an answer/question/handoff has been stored.
-It has a 24-step and 60-second turn budget, so a failed tool/model cannot spin
-forever. A model failure creates a stored fallback answer and handoff. Each
-session is serialized; unrelated calls can run concurrently.
-
-Irreversible actions require a preview and explicit Russian/Kazakh confirmation
-on the next turn, for example `Да`, `Да, верно`, `Подтверждаю`, `Иә`, or
-`Иә, тіркеңіз`. The first request cannot confirm itself. Corrections invalidate
-the preview and recalculate read-only work; topic switches and intervening
-questions require a fresh preview. Each irreversible action is confirmed
-separately. A refusal cancels it. Clear but unrecognized confirmation wording
-conservatively results in another preview.
-
-**Storage lifetime:** the KV store is an in-process Go map, persistent across
-turns while the process runs. It is **not durable across restarts** or shared
-between instances. Up to 1,000 sessions are retained, with a one-hour idle TTL
-(expired entries are pruned when acquiring a session) and 100 turns per session.
-Idempotency applies while the session remains in memory. Backend mutations and
-mock receipts also last only for the process lifetime. Durable recovery would
-require a transactional database or a persistence-enabled external store.
-
-### Synthetic backend and limits
-
-All 31 catalog actions have local implementations over `mock_backend.json` and
-`knowledge_base.json`. The reference date is **2026-10-01**, as specified in the
-dataset. Prices use its formulas; unknown IINs receive bonus-malus class 3.
-IDs are allocated above the supplied fixture ranges. Backend results are
-copied before returning, and mutations are protected by a lock.
-
-No SMS, callback, payment, policy, medical appointment, or operator transfer
-reaches a real service. Mock creation/booking/transfer results include
-`mock: true`. New policies wait for payment. Phone/IIN lookup is synthetic client
-identification, not production authentication.
-
-Deliberate mock simplifications:
-
-- CASCO quotation supports the Standard package; older vehicles are rejected.
-- Travel quotation recognizes an explicit set of country names and common
-  Russian/Kazakh equivalents. Unmapped countries require operator verification.
-- Appointment calendars are not supplied: mocks use one 10:00 slot per location
-  and day, prevent duplicate bookings, and suggest the next day when occupied.
-- DMS coverage returns the package rules; ambiguous services remain unverified.
-  Basic-package specialist booking is referred for verification of a referral.
-- Renewal reuses the fixture premium; policy updates currently use a synthetic
-  zero extra premium. These are demo rules, not production insurance pricing.
-- Response generation is constrained to tool results and the knowledge base,
-  but an LLM's wording still needs evaluation. There is no claim of measured
-  routing accuracy or achievement of the brief's 500 ms target without a live run.
-
-### Validation and development-set evaluation
+Run from `backend/`:
 
 ```powershell
 go test ./...
 go vet ./...
 go test -race ./... # requires a supported C compiler for cgo
+$env:TEST_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5432/voice_router_test?sslmode=disable"
+go test ./internal/router -run Postgres -count=1
 ```
 
-Tests use a fake model or local mock OpenAI HTTP server, so they need no API key.
-They cover persistence-before-return, idempotency, concurrent sessions,
-confirmation/corrections/cancellation, topic return, quote-to-purchase context,
-multi-intent priority, confidence thresholds, language, tool errors, pricing,
-all catalog action implementations, HTTP contracts, and OpenAI error responses.
+Ordinary tests use a fake repository/model or mock OpenAI HTTP server and do not
+need API credentials. PostgreSQL integration tests run when
+`TEST_DATABASE_URL` is configured; use a dedicated test database. Each integration
+test creates and drops an isolated schema, so the test role needs schema-creation
+permission. Tests cover
+review authorization, stale/replayed feedback, restart recovery, duplicate
+operation prevention, database failures, context assembly, language, confidence,
+multi-intent/topic return, and separate action consent.
 
-For actual routing evaluation, configure `OPENAI_API_KEY` and run:
+For live routing evaluation, set `OPENAI_API_KEY` and run from `backend/`:
 
 ```powershell
-go run ./cmd/evaluate -limit 5  # smoke run; makes paid OpenAI requests
-go run ./cmd/evaluate           # all 104 utterances
-python voice_router_dataset/evaluate.py predictions.json voice_router_dataset/dev_utterances.json
+go run ./cmd/evaluate -input ../voice_router_dataset/dev_utterances.json -limit 5
+go run ./cmd/evaluate -input ../voice_router_dataset/dev_utterances.json
+python ../voice_router_dataset/evaluate.py predictions.json ../voice_router_dataset/dev_utterances.json
 ```
 
-The Go evaluator prints primary accuracy and mean routing latency, then writes
-the format accepted by the supplied Python scorer. Python is only needed for
-the reference scorer's detailed breakdown. The evaluator invokes routing only;
-it does not execute business actions or measure complete multi-turn quality.
-
-Implementation: `internal/router/engine.go` (workflow), `store.go` (KV/session
-locking), `openai.go` (LLM calls), `backend.go` (mock tools), `catalog.go` (data
-loading/slot validation), and `http.go` (integration API).
+These commands make paid OpenAI requests. The evaluator measures routing only,
+without business actions or full multi-turn quality. Evaluation labels are
+never sent to the routing model.

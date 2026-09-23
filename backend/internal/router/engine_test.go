@@ -96,17 +96,18 @@ func TestStoreAnswerAndDuplicateRequest(t *testing.T) {
 }
 func TestConfirmationAndRetryDoNotRepeatMutation(t *testing.T) {
 	slots := Values{"phone": "+77010000003", "contact_field": "email", "new_value": "new@mail.example"}
-	e, m := setup(t, decision("SC29", slots), decision("SC29", Values{}))
+	e, m := setup(t, decision("SC29", slots))
 	first := process(t, e, input("one", "Измените почту"))
 	if first.Status != "awaiting_confirmation" || actionExecuted(first, "update_contact") {
 		t.Fatal("mutation ran before confirmation")
 	}
+	// A bare yes to the preview is a deterministic continuation (no model call).
 	second := process(t, e, input("two", "Да, верно."))
 	if second.Status != "completed" || !actionExecuted(second, "update_contact") {
 		t.Fatalf("confirmation did not execute: %#v", second)
 	}
 	_ = process(t, e, input("two", "Да, верно."))
-	if m.calls != 2 {
+	if m.calls != 1 {
 		t.Fatal("retry called model")
 	}
 	c := e.Store.(*memoryTestRepo).backend.Execute("find_client", Values{"phone": "+77010000003"}, "")
@@ -115,9 +116,10 @@ func TestConfirmationAndRetryDoNotRepeatMutation(t *testing.T) {
 	}
 }
 func TestCorrectionInvalidatesConfirmation(t *testing.T) {
-	e, _ := setup(t, decision("SC29", Values{"phone": "+77010000003", "contact_field": "email", "new_value": "one@mail.example"}), decision("SC29", Values{"new_value": "two@mail.example"}), decision("SC29", Values{}))
+	e, _ := setup(t, decision("SC29", Values{"phone": "+77010000003", "contact_field": "email", "new_value": "one@mail.example"}), decision("SC29", Values{"new_value": "two@mail.example"}))
 	process(t, e, input("one", "Изменить почту"))
-	o := process(t, e, input("two", "Да"))
+	// More than a bare yes goes to the model, which extracts the correction.
+	o := process(t, e, input("two", "Да, но почта two@mail.example"))
 	if o.Status != "awaiting_confirmation" || actionExecuted(o, "update_contact") {
 		t.Fatal("changed parameters executed with stale confirmation")
 	}

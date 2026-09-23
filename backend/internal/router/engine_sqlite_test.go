@@ -53,7 +53,7 @@ func TestSQLiteReviewAndBusinessStateSurviveRestart(t *testing.T) {
 		t.Fatal(final, err)
 	}
 	replay, err := e2.Process(context.Background(), input("consent", "Да"))
-	if err != nil || !equalJSON(final, replay) || m2.calls != 1 {
+	if err != nil || !equalJSON(final, replay) || m2.calls != 0 {
 		t.Fatal("completed replay differs", err)
 	}
 	// A new call observes the database mutation, not the fixture seed.

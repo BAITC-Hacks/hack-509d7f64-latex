@@ -1,0 +1,5 @@
+.env
+*.exe
+coverage.out
+predictions.json
+.cache/

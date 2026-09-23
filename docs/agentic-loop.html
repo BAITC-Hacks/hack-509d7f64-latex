@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Voice Router Turn Loop</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  color-scheme: light;
+  --ground: #F4F6F2;
+  --surface: #FFFFFF;
+  --surface-2: #EAEEE7;
+  --ink: #1A2028;
+  --muted: #5E6772;
+  --line: #CFD5CB;
+  --fast: #0B7A75;
+  --fast-tint: #DDF0EE;
+  --llm: #4A55C4;
+  --llm-tint: #E4E6F8;
+  --warn: #A86A12;
+  --warn-tint: #F6EAD3;
+  --crit: #A93F3A;
+  --crit-tint: #F5DFDD;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #0F1418; --surface: #171D23; --surface-2: #1F262E;
+    --ink: #E4E8EC; --muted: #98A2AC; --line: #2C353E;
+    --fast: #45B7AF; --fast-tint: #123634; --llm: #8F99F2; --llm-tint: #23284A;
+    --warn: #D99A3E; --warn-tint: #3A2C12; --crit: #E06B64; --crit-tint: #3F1E1C;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #0F1418; --surface: #171D23; --surface-2: #1F262E;
+  --ink: #E4E8EC; --muted: #98A2AC; --line: #2C353E;
+  --fast: #45B7AF; --fast-tint: #123634; --llm: #8F99F2; --llm-tint: #23284A;
+  --warn: #D99A3E; --warn-tint: #3A2C12; --crit: #E06B64; --crit-tint: #3F1E1C;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 16px;
+  line-height: 1.55;
+  padding-block: 40px 80px;
+  padding-inline: 16px;
+}
+main { max-width: 900px; margin-inline: auto; }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 600; line-height: 1.15; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(34px, 6vw, 52px); letter-spacing: -0.01em; }
+h2 { font-size: 26px; margin-block: 56px 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+h3 { font-size: 19px; font-weight: 500; }
+p { margin: 0 0 12px; max-width: 68ch; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 12px; }
+.lead { font-size: 18px; color: var(--ink); max-width: 62ch; }
+code, .mono { font-family: var(--font-mono); font-size: 0.92em; }
+code { background: var(--surface-2); padding: 1px 5px; border-radius: 3px; }
+a { color: var(--llm); }
+
+.principles { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 20px; }
+.principle { background: var(--surface); border: 1px solid var(--line); padding: 14px 16px; }
+.principle b { display: block; font-family: var(--font-display); font-size: 17px; font-weight: 600; margin-bottom: 4px; }
+.principle span { color: var(--muted); font-size: 14.5px; }
+
+figure { margin: 24px 0; }
+.scroll { overflow-x: auto; }
+figure svg { display: block; max-width: 100%; height: auto; font-family: var(--font-body); }
+figcaption { font-size: 14px; color: var(--muted); margin-top: 10px; max-width: 70ch; }
+.box { fill: var(--surface); stroke: currentColor; stroke-width: 1.2; }
+.box-fast { fill: var(--fast-tint); stroke: var(--fast); stroke-width: 1.5; }
+.box-llm { fill: var(--llm-tint); stroke: var(--llm); stroke-width: 1.5; }
+.box-gate { fill: var(--surface-2); stroke: currentColor; stroke-width: 1.2; }
+.t { font-size: 14px; font-weight: 600; fill: currentColor; }
+.s { font-size: 11.5px; fill: var(--muted); }
+.lbl { font-size: 11.5px; fill: var(--muted); }
+.lbl-fast { font-size: 11.5px; fill: var(--fast); font-weight: 500; }
+.lbl-llm { font-size: 11.5px; fill: var(--llm); font-weight: 500; }
+.lbl-warn { font-size: 11.5px; fill: var(--warn); font-weight: 500; }
+.edge { stroke: currentColor; stroke-width: 1.3; fill: none; }
+.edge-fast { stroke: var(--fast); stroke-width: 1.5; fill: none; }
+.edge-llm { stroke: var(--llm); stroke-width: 1.5; fill: none; }
+.edge-bypass { stroke: var(--fast); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+.edge-warn { stroke: var(--warn); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+.edge-loop { stroke: currentColor; stroke-width: 1.2; fill: none; stroke-dasharray: 2 4; }
+
+.stages { list-style: none; margin: 0; padding: 0; counter-reset: stage -1; display: grid; gap: 14px; }
+.stage { display: grid; grid-template-columns: 56px 1fr; background: var(--surface); border: 1px solid var(--line); }
+.stage .n { font-family: var(--font-mono); font-size: 22px; font-weight: 500; color: var(--muted); padding: 16px 0 0 14px; border-right: 1px solid var(--line); }
+.stage .n::before { counter-increment: stage; content: counter(stage, decimal-leading-zero); }
+.stage .body { padding: 14px 18px 16px; min-width: 0; }
+.stage h3 { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; }
+.stage .ms { font-family: var(--font-mono); font-size: 12px; color: var(--muted); font-weight: 400; }
+.stage .who { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 7px; border: 1px solid; border-radius: 2px; font-weight: 500; }
+.who-go { color: var(--fast); }
+.who-llm { color: var(--llm); }
+.stage p { margin-top: 8px; font-size: 15px; }
+.stage ul { margin: 6px 0 0; padding-left: 18px; font-size: 15px; }
+.stage li { margin-bottom: 3px; }
+.change { margin-top: 12px; padding: 10px 12px; background: var(--warn-tint); border-left: 3px solid var(--warn); font-size: 14.5px; }
+.change b { color: var(--warn); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; display: block; margin-bottom: 3px; }
+.change p { margin: 0; max-width: none; }
+@media (max-width: 520px) {
+  .stage { grid-template-columns: 1fr; }
+  .stage .n { border-right: 0; border-bottom: 1px solid var(--line); padding: 8px 14px; font-size: 16px; }
+}
+
+table { width: 100%; border-collapse: collapse; font-size: 14.5px; background: var(--surface); }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); }
+
+.ladder { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 0; }
+.ladder li { display: grid; grid-template-columns: 52px 1fr; border: 1px solid var(--line); border-top: 0; background: var(--surface); }
+.ladder li:first-child { border-top: 1px solid var(--line); }
+.ladder .lvl { font-family: var(--font-mono); font-size: 13px; padding: 12px 0 0 12px; color: var(--muted); }
+.ladder .txt { padding: 12px 14px; font-size: 15px; }
+.ladder .txt b { font-family: var(--font-display); font-weight: 600; font-size: 16px; }
+.ladder li[data-level="0"] .lvl { color: var(--llm); }
+.ladder li[data-level="1"] .lvl { color: var(--llm); }
+.ladder li[data-level="2"] .lvl { color: var(--fast); }
+.ladder li[data-level="3"] .lvl { color: var(--crit); }
+
+.formula { font-family: var(--font-mono); font-size: 14px; background: var(--surface-2); padding: 12px 14px; overflow-x: auto; margin: 12px 0; white-space: pre; }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 14px; }
+.card { background: var(--surface); border: 1px solid var(--line); padding: 14px 16px; }
+.card h3 { margin-bottom: 8px; }
+.card ul { margin: 0; padding-left: 18px; font-size: 15px; }
+.card.out h3 { color: var(--crit); }
+.card.in h3 { color: var(--fast); }
+.footer { margin-top: 56px; padding-top: 14px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+:focus-visible { outline: 2px solid var(--llm); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="eyebrow">Saqta Voice Router · layer 2 · proposal · 2026-09-23</div>
+  <h1>The turn loop</h1>
+  <p class="lead">One caller utterance = one pass through this loop. The loop is what the jury measures: which scenario, why, in how many milliseconds. Everything the critique asked for lands as a stage in it, so the page walks the loop top to bottom and marks, at each stage, what changes versus the code in <code>backend/</code> today.</p>
+
+  <div class="principles">
+    <div class="principle"><b>The LLM chooses every scenario</b><span>No stage other than an LLM call ever assigns a scenario ID to an utterance. Retrieval narrows, Go verifies, but the choice is the model's.</span></div>
+    <div class="principle"><b>Go verifies and executes</b><span>The model proposes; the executor checks the proposal against the catalog and the state before anything runs. Tools are Go functions the model cannot name.</span></div>
+    <div class="principle"><b>Every stage emits a trace row</b><span>Path taken, candidates with scores, chosen + reason, alternatives, milliseconds. The supervisor panel is a rendering of the trace, not a separate feature.</span></div>
+    <div class="principle"><b>No dead ends</b><span>A timeout, a provider error or an unparseable answer drops one rung down a fallback ladder. The caller always gets a stored answer within the budget.</span></div>
+  </div>
+
+  <h2>Shape of one turn</h2>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 900 1040" role="img" aria-label="Vertical flow of one turn: transcript, session load, deterministic pre-router, retrieval shortlist, gate, then either a fast LLM route or a full LLM route, merged into an uncertainty score, policy, executor, response, trace, and a loop back to the next turn. Dashed bypasses skip the LLM for slot replies and skip the executor for clarification or handoff.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker>
+        <marker id="ah-fast" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--fast)"/></marker>
+        <marker id="ah-llm" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--llm)"/></marker>
+        <marker id="ah-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--warn)"/></marker>
+      </defs>
+
+      <!-- loop back edge -->
+      <polyline class="edge-loop" points="270,968 40,968 40,138 266,138" marker-end="url(#ah)"/>
+      <text class="lbl" x="48" y="128">next turn</text>
+
+      <!-- bypass: pre-router → executor -->
+      <polyline class="edge-bypass" points="630,228 840,228 840,788 634,788" marker-end="url(#ah-fast)"/>
+      <text class="lbl-fast" x="642" y="218">slot reply · yes/no on a preview</text>
+      <text class="lbl-fast" x="642" y="778">no LLM call</text>
+
+      <!-- bypass: policy → response -->
+      <polyline class="edge-warn" points="270,698 160,698 160,878 266,878" marker-end="url(#ah-warn)"/>
+      <text class="lbl-warn" x="168" y="770">clarify · hand off</text>
+      <text class="lbl-warn" x="168" y="786">skip executor</text>
+
+      <!-- main column boxes -->
+      <rect class="box" x="270" y="20" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="44" text-anchor="middle">Transcript arrives</text>
+      <text class="s" x="450" y="62" text-anchor="middle">raw text · language hint · session_id · request_id</text>
+
+      <line class="edge" x1="450" y1="76" x2="450" y2="106" marker-end="url(#ah)"/>
+      <rect class="box" x="270" y="110" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="134" text-anchor="middle">Load session</text>
+      <text class="s" x="450" y="152" text-anchor="middle">active · suspended · queued · pending preview · 10 turns</text>
+
+      <line class="edge" x1="450" y1="166" x2="450" y2="196" marker-end="url(#ah)"/>
+      <rect class="box-fast" x="270" y="200" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="224" text-anchor="middle">Deterministic pre-router</text>
+      <text class="s" x="450" y="242" text-anchor="middle">Go · ~1 ms · continues an already chosen scenario only</text>
+
+      <line class="edge" x1="450" y1="256" x2="450" y2="286" marker-end="url(#ah)"/>
+      <rect class="box-fast" x="270" y="290" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="314" text-anchor="middle">Retrieval shortlist</text>
+      <text class="s" x="450" y="332" text-anchor="middle">~10 ms · top-8 of 43 by example similarity</text>
+
+      <line class="edge" x1="450" y1="346" x2="450" y2="376" marker-end="url(#ah)"/>
+      <rect class="box-gate" x="270" y="380" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="404" text-anchor="middle">Gate</text>
+      <text class="s" x="450" y="422" text-anchor="middle">margin ≥ τ · fast_path_eligible · no workflow awaiting input</text>
+
+      <!-- branch -->
+      <polyline class="edge-fast" points="375,436 375,458 250,458 250,476" marker-end="url(#ah-fast)"/>
+      <text class="lbl-fast" x="262" y="452">all true</text>
+      <polyline class="edge-llm" points="525,436 525,458 650,458 650,476" marker-end="url(#ah-llm)"/>
+      <text class="lbl-llm" x="560" y="452">otherwise</text>
+
+      <rect class="box-fast" x="110" y="480" width="280" height="56" rx="3"/>
+      <text class="t" x="250" y="504" text-anchor="middle">Fast LLM route</text>
+      <text class="s" x="250" y="522" text-anchor="middle">small model · 3 candidates · no history · ~350 ms</text>
+
+      <rect class="box-llm" x="510" y="480" width="280" height="56" rx="3"/>
+      <text class="t" x="650" y="504" text-anchor="middle">Full LLM route</text>
+      <text class="s" x="650" y="522" text-anchor="middle">main model · shortlist + state + 10 turns · ~900 ms</text>
+
+      <!-- merge -->
+      <polyline class="edge-fast" points="250,536 250,558 375,558 375,576" marker-end="url(#ah-fast)"/>
+      <polyline class="edge-llm" points="650,536 650,558 525,558 525,576" marker-end="url(#ah-llm)"/>
+
+      <rect class="box" x="270" y="580" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="604" text-anchor="middle">Uncertainty score</text>
+      <text class="s" x="450" y="622" text-anchor="middle">Go · margin · agreement · model vote · boundary conflict</text>
+
+      <line class="edge" x1="450" y1="636" x2="450" y2="666" marker-end="url(#ah)"/>
+      <rect class="box" x="270" y="670" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="694" text-anchor="middle">Policy</text>
+      <text class="s" x="450" y="712" text-anchor="middle">execute · clarify with 2 options · hand off with context</text>
+
+      <line class="edge" x1="450" y1="726" x2="450" y2="756" marker-end="url(#ah)"/>
+      <rect class="box" x="270" y="760" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="784" text-anchor="middle">Executor</text>
+      <text class="s" x="450" y="802" text-anchor="middle">Go · identify → slots → actions · preview before irreversible</text>
+
+      <line class="edge" x1="450" y1="816" x2="450" y2="846" marker-end="url(#ah)"/>
+      <rect class="box" x="270" y="850" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="874" text-anchor="middle">Response</text>
+      <text class="s" x="450" y="892" text-anchor="middle">catalog template · LLM wording only when needed</text>
+
+      <line class="edge" x1="450" y1="906" x2="450" y2="936" marker-end="url(#ah)"/>
+      <rect class="box" x="270" y="940" width="360" height="56" rx="3"/>
+      <text class="t" x="450" y="964" text-anchor="middle">Trace + persist</text>
+      <text class="s" x="450" y="982" text-anchor="middle">stage ms · path · shortlist · reason · alternatives · fallback</text>
+
+      <!-- legend -->
+      <rect x="270" y="1012" width="12" height="12" class="box-fast"/><text class="lbl" x="288" y="1022">deterministic / fast</text>
+      <rect x="450" y="1012" width="12" height="12" class="box-llm"/><text class="lbl" x="468" y="1022">main LLM</text>
+      <line x1="560" y1="1018" x2="590" y2="1018" class="edge-warn"/><text class="lbl" x="598" y="1022">uncertain outcome</text>
+    </svg>
+    </div>
+    <figcaption>Three ways through one turn. Green: a continuation of a scenario the LLM already chose (a phone number, a “да”), which never reaches a model. Green-to-grey: an obvious standalone request, routed by a small model over three candidates. Blue: everything else, routed by the main model over a shortlist with the dialog state. All three converge on the same executor, response and trace.</figcaption>
+  </figure>
+
+  <h2>Stages</h2>
+  <ol class="stages">
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Transcript arrives <span class="who who-go">contract</span></h3>
+      <p>Layer 1 (STT + normalization) sends <code>session_id</code>, <code>request_id</code>, the raw normalized transcript, and a language hint (<code>ru</code> / <code>kk</code> / <code>mixed</code>). Idempotency on <code>request_id</code> stays exactly as today.</p>
+      <div class="change"><b>Change vs. today</b><p>Drop <code>slots</code> from the layer-1 contract. Today the normalizer may pre-extract slots that override the router's own extraction, so two components own the same values. The router extracts; layer 1 transcribes.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Load session <span class="who who-go">go</span> <span class="ms">~0 ms</span></h3>
+      <p>Per-session lock, then the state: reply language, identity, the active frame (scenario, slots, next action index, pending preview), the stack of suspended frames, the queue of not-yet-started intents from a multi-intent turn, and the last 10 turns.</p>
+      <div class="change"><b>Change vs. today</b><p>None in shape. In-memory store stays for the hackathon; the half-started PostgreSQL lease layer (<code>repository.go</code>) is parked.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Deterministic pre-router <span class="who who-go">go</span> <span class="ms">~1 ms</span></h3>
+      <p>Handles exactly two situations, both continuations of a scenario the LLM chose on an earlier turn, so no classification happens here:</p>
+      <ul>
+        <li>The active frame is waiting for a slot and the utterance parses cleanly as that slot type per <code>slots.json</code> (phone <code>^\+7\d{10}$</code>, 12-digit IIN, a date, an enum value). Fill the slot, jump straight to the executor.</li>
+        <li>A preview is pending and the utterance is an explicit yes/no from the catalog lexicon (<i>Да / Подтверждаю / Иә / Нет / Жоқ</i>…). Resolve it, jump to the executor.</li>
+      </ul>
+      <p>Anything with extra words (“да, но телефон другой”) fails the parse and continues to retrieval and the LLM.</p>
+      <div class="change"><b>Change vs. today</b><p>Today every turn pays a full LLM round-trip, including “910512300456”. Decision ownership becomes one rule: <b>the LLM proposes, Go verifies.</b> On the LLM path an irreversible action executes only if the model says <code>is_continuation=true</code> <i>and</i> the text contains an explicit affirmative; a bare regex never executes anything on its own.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Retrieval shortlist <span class="who who-go">go</span> <span class="ms">~10 ms</span></h3>
+      <p>Score the utterance against every scenario's <code>examples</code> (ru + kk, ~7 per scenario), <code>description</code> and <code>not_this_if</code> conditions. Embeddings computed once at startup, or BM25 over the same text if we want zero external calls. Output: top-8 scenario IDs with scores, always joined by the active / suspended / queued scenario IDs and the three system intents.</p>
+      <p>Two jobs: shrink the routing prompt from all 43 scenarios (~90 KB of JSON) to about ten, and produce a second, independent opinion that the uncertainty score can compare with the model's.</p>
+      <div class="change"><b>Change vs. today</b><p>New stage. Framing for the jury matters: retrieval <i>feeds</i> the LLM and never assigns a scenario. The trace shows the shortlist with scores next to the model's choice so this is visible, not claimed.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Gate <span class="who who-go">go</span> <span class="ms">~0 ms</span></h3>
+      <p>Fast path when all of these hold, full path otherwise:</p>
+      <ul>
+        <li>Top-1 retrieval score leads top-2 by at least <code>τ_fast</code> (calibrated, see the dev loop).</li>
+        <li>Top-1 is marked <code>fast_path_eligible: true</code> in <code>scenarios.json</code>. The dataset marks nine: SC18, SC23, SC24, SC26, SC31, SC33, SC34, SC36, SC37: documents, clinics, e-card, resend docs, payment methods, offices, app help, callback, human operator.</li>
+        <li>No active frame is waiting for input or holding a preview, and the stack is empty.</li>
+      </ul>
+      <div class="change"><b>Change vs. today</b><p>The organizers shipped the <code>fast_path_eligible</code> flag; the current <code>Scenario</code> struct doesn't read it. This gate is where the “hybrid” in the case title lives.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Route with an LLM <span class="who who-llm">llm</span> <span class="ms">fast ~350 ms · full ~900 ms</span></h3>
+      <p><b>Fast route.</b> Small, low-latency model. Prompt: the utterance, three candidate scenarios (name, description, <code>not_this_if</code>), the system intents, the dataset date. No history (the gate guaranteed there is no live workflow). Output: one scenario, a one-line reason, reply language, slots.</p>
+      <p><b>Full route.</b> Main model. Prompt: the shortlist with examples and boundaries, slot definitions for those scenarios only, the compact state (active, suspended, queued, identity), the last 10 turns. Output: scenarios in spoken order, alternatives, reason, slots, <code>is_continuation</code>, <code>needs_handoff</code>. Strict JSON schema as today.</p>
+      <div class="change"><b>Change vs. today</b><p>Prompt shrinks roughly 5–8×. The per-scenario exceptions now baked into the system prompt (“small approved payout dispute is SC19, not SC17…”) move into the dataset's <code>not_this_if</code>, where the model reads them for the shortlisted scenarios; the prompt stops growing with every hard case we discover. Two models sit behind the existing <code>Model</code> interface, so the swap is configuration.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Uncertainty score <span class="who who-go">go</span> <span class="ms">~0 ms</span></h3>
+      <p>A number computed in Go from observable signals, not read off the model:</p>
+      <div class="formula">u = w1·(1 − margin_retrieval)
+  + w2·[retrieval_top1 ≠ llm_top1]
+  + w3·(1 − llm_confidence)          ← one vote, not the verdict
+  + w4·[a not_this_if condition of llm_top1 retrieved strongly]</div>
+      <p>Thresholds <code>τ_exec</code> and <code>τ_handoff</code> come from sweeping <code>u</code> over the dev set and the sample dialogs, then get frozen and written into the README. Every component goes into the trace, so the supervisor sees <i>why</i> the robot doubted, not just that it did.</p>
+      <div class="change"><b>Change vs. today</b><p>Replaces the self-reported confidence with 0.75 / 0.45 cut-offs that were chosen, not measured. The brief's “where the model is unsure, it shows it” becomes evidence-based.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Policy <span class="who who-go">go</span> <span class="ms">~0 ms</span></h3>
+      <ul>
+        <li><b>Confident</b> → execute. Urgent scenarios (SC11 accident, SC15 illness abroad, SC38 fraud) first, the rest of a multi-intent turn queued, and the answer offers to come back to them.</li>
+        <li><b>Uncertain</b> → clarification with two named options taken from the model's alternatives ∪ retrieval top-2. Skips the executor.</li>
+        <li><b>Hand off</b> when: two consecutive uncertain turns, the model set <code>needs_handoff</code> for a scenario whose <code>handoff.when</code> applies, SC37 was requested, or the fallback ladder bottomed out. The packet carries transcript, chosen + alternatives, slots, queue. Skips the executor.</li>
+      </ul>
+      <div class="change"><b>Change vs. today</b><p>Same decisions, driven by <code>u</code> instead of the raw model number.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Executor <span class="who who-go">go</span> <span class="ms">~10 ms on mocks</span></h3>
+      <p>Identify if <code>requires_identification</code> → collect required slots in catalog order → run <code>actions</code> in catalog order. An <code>irreversible</code> action produces a preview and a pending frame; the next turn's explicit yes (verified as in stage 02) runs it. Corrections invalidate the preview. Tools are Go functions; the model cannot name a tool or a storage key.</p>
+      <div class="change"><b>Change vs. today</b><p>Frozen. This part already does more than the demo can show. No new frame semantics, no persistence work, no new mock rules.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Response <span class="who who-go">go</span> <span class="who who-llm">llm</span> <span class="ms">0 ms template · ~350 ms LLM</span></h3>
+      <p>Standard states are templated from the dataset, which already ships them: the slot question from <code>slots.json → prompt</code>, the scenario's <code>responses.opening</code> / <code>closing</code> with <code>{price}</code>-style placeholders filled from tool results, a fixed confirmation preview (“Оформляю ОГПО на … за … тенге. Подтверждаете?”). Deterministic, safe, instant, and TTS can start immediately.</p>
+      <p>The LLM <code>Respond</code> call runs only for: clarification wording (turning two scenario names into a natural question), handoff messages, tool-error explanations, and free-form knowledge-base answers.</p>
+      <div class="change"><b>Change vs. today</b><p>Removes the second serial LLM round-trip from most turns. It is also a safety win: a template cannot claim a policy was issued when it wasn't.</p></div>
+    </div></li>
+
+    <li class="stage"><div class="n"></div><div class="body">
+      <h3>Trace + persist <span class="who who-go">go</span></h3>
+      <p>The trace row for the turn: milliseconds per stage, path taken (<code>bypass</code> / <code>fast</code> / <code>full</code>), shortlist with scores, chosen scenario(s) with the model's reason, alternatives, uncertainty components, which <code>not_this_if</code> boundary was involved, fallback level used, actions with preview/execute mode. Store the turn under its <code>request_id</code>, unlock the session, return. The next turn re-enters at stage 01.</p>
+      <div class="change"><b>Change vs. today</b><p>Adds path, shortlist, uncertainty components and boundary evidence. The supervisor panel renders this row and nothing else.</p></div>
+    </div></li>
+  </ol>
+
+  <h2>Latency budget</h2>
+  <p>Measured from the end of the transcript to the first byte of the answer. Numbers are targets for the demo network, to be replaced by measurements from the dev loop; the brief's marks are 500 ms for the scenario choice and 1.5 s to the start of the reply.</p>
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 900 230" role="img" aria-label="Three stacked horizontal bars showing time budget per path against a 0 to 1600 millisecond scale: bypass about 15 ms, fast path about 380 ms under the 500 ms mark, full path about 1275 ms under the 1500 ms mark.">
+      <!-- scale: 0..1600 ms → x 170..850 (0.425 px/ms) -->
+      <line x1="170" y1="20" x2="170" y2="176" stroke="currentColor" stroke-width="1"/>
+      <line x1="170" y1="176" x2="850" y2="176" stroke="currentColor" stroke-width="1"/>
+      <g class="lbl" text-anchor="middle">
+        <text x="170" y="194">0</text>
+        <text x="382.5" y="194">500</text>
+        <text x="595" y="194">1000</text>
+        <text x="807.5" y="194">1500 ms</text>
+      </g>
+      <line x1="382.5" y1="20" x2="382.5" y2="176" stroke="var(--warn)" stroke-width="1" stroke-dasharray="3 3"/>
+      <text class="lbl-warn" x="388" y="30">routing mark</text>
+      <line x1="807.5" y1="20" x2="807.5" y2="176" stroke="var(--crit)" stroke-width="1" stroke-dasharray="3 3"/>
+      <text class="lbl" x="813" y="30" style="fill:var(--crit)">reply mark</text>
+
+      <!-- row 1: bypass ≈ 15 ms -->
+      <text class="t" x="160" y="58" text-anchor="end">Bypass</text>
+      <text class="s" x="160" y="72" text-anchor="end">slot reply, yes/no</text>
+      <rect x="170" y="48" width="6.4" height="22" fill="var(--fast)"/>
+      <text class="lbl" x="184" y="63">≈ 15 ms · no model call</text>
+
+      <!-- row 2: fast ≈ 380 ms: pre 5, retr 10, llm 350, tools 10, template 5 -->
+      <text class="t" x="160" y="106" text-anchor="end">Fast path</text>
+      <text class="s" x="160" y="120" text-anchor="end">9 eligible scenarios</text>
+      <rect x="170" y="96" width="2.1" height="22" fill="var(--muted)"/>
+      <rect x="172.1" y="96" width="4.3" height="22" fill="var(--muted)"/>
+      <rect x="176.4" y="96" width="148.8" height="22" fill="var(--fast)"/>
+      <rect x="325.2" y="96" width="4.3" height="22" fill="var(--muted)"/>
+      <rect x="329.5" y="96" width="2.1" height="22" fill="var(--muted)"/>
+      <text class="lbl" x="340" y="111">≈ 380 ms</text>
+
+      <!-- row 3: full ≈ 1275: pre 5, retr 10, llm 900, tools 10, respond 350 -->
+      <text class="t" x="160" y="154" text-anchor="end">Full path</text>
+      <text class="s" x="160" y="168" text-anchor="end">everything else</text>
+      <rect x="170" y="144" width="2.1" height="22" fill="var(--muted)"/>
+      <rect x="172.1" y="144" width="4.3" height="22" fill="var(--muted)"/>
+      <rect x="176.4" y="144" width="382.5" height="22" fill="var(--llm)"/>
+      <rect x="558.9" y="144" width="4.3" height="22" fill="var(--muted)"/>
+      <rect x="563.2" y="144" width="148.8" height="22" fill="var(--llm)" opacity="0.55"/>
+      <text class="lbl" x="720" y="159">≈ 1275 ms</text>
+
+      <!-- legend -->
+      <rect x="170" y="212" width="10" height="10" fill="var(--fast)"/><text class="lbl" x="186" y="221">small model</text>
+      <rect x="280" y="212" width="10" height="10" fill="var(--llm)"/><text class="lbl" x="296" y="221">main model, route</text>
+      <rect x="420" y="212" width="10" height="10" fill="var(--llm)" opacity="0.55"/><text class="lbl" x="436" y="221">main model, wording (only when needed)</text>
+      <rect x="690" y="212" width="10" height="10" fill="var(--muted)"/><text class="lbl" x="706" y="221">Go stages + tools</text>
+    </svg>
+    </div>
+    <figcaption>Where the milliseconds go on each path. The two model calls are the whole story; every Go stage together is under 30 ms. The full path only crosses 1 s when it also needs LLM wording; with a template response it lands around 925 ms.</figcaption>
+  </figure>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Stage</th><th class="num">Bypass</th><th class="num">Fast</th><th class="num">Full</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Load session + pre-router</td><td class="num">1</td><td class="num">1</td><td class="num">1</td><td>in-process map</td></tr>
+      <tr><td>Retrieval shortlist</td><td class="num">–</td><td class="num">10</td><td class="num">10</td><td>embeddings precomputed at start</td></tr>
+      <tr><td>LLM route</td><td class="num">–</td><td class="num">350</td><td class="num">900</td><td>timeouts 600 / 1200 ms, then fallback</td></tr>
+      <tr><td>Executor + mock tools</td><td class="num">10</td><td class="num">10</td><td class="num">10</td><td>synthetic backend</td></tr>
+      <tr><td>Response</td><td class="num">0</td><td class="num">0</td><td class="num">0–350</td><td>template; LLM only for clarify / handoff / free-form</td></tr>
+      <tr><td><b>Total to first byte</b></td><td class="num"><b>≈ 15</b></td><td class="num"><b>≈ 380</b></td><td class="num"><b>≈ 925–1275</b></td><td>brief: 500 ms route, 1500 ms reply</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Fallback ladder</h2>
+  <p>Any model call that times out, errors, or returns JSON that fails validation drops one rung. Each rung is recorded in the trace as <code>fallback_level</code>.</p>
+  <ol class="ladder">
+    <li data-level="0"><div class="lvl">L0</div><div class="txt"><b>Primary model</b> — the route chosen by the gate. Timeout 600 ms on the fast path, 1200 ms on the full path.</div></li>
+    <li data-level="1"><div class="lvl">L1</div><div class="txt"><b>Secondary model / provider</b>, same prompt. A different vendor if we have one; otherwise the small model with the full prompt. One attempt.</div></li>
+    <li data-level="2"><div class="lvl">L2</div><div class="txt"><b>Retrieval-only, never execute.</b> If the retrieval margin is high, answer with a clarification that names the top candidate (“Вы про оформление ОГПО, верно?”) and let the next turn confirm through the LLM. Nothing runs, nothing is promised.</div></li>
+    <li data-level="3"><div class="lvl">L3</div><div class="txt"><b>Hand off with context.</b> The current behaviour on any error, but now the last resort instead of the first.</div></li>
+  </ol>
+
+  <h2>The outer loop: measure, then tune</h2>
+  <p>The runtime loop above has four tunables (<code>τ_fast</code>, <code>τ_exec</code>, <code>τ_handoff</code>, the shortlist size). None of them is guessed; they come out of a dev harness that runs offline against the dataset.</p>
+  <div class="two">
+    <div class="card"><h3>1 · Single-turn accuracy</h3><ul>
+      <li><code>dev_utterances.json</code>, all 104, empty session.</li>
+      <li>Per-path accuracy (bypass never applies here; fast vs. full).</li>
+      <li>Confusion pairs, e.g. SC17 ↔ SC19, SC11 ↔ SC12 ↔ SC13.</li>
+      <li>Reference scorer <code>evaluate.py</code> for the official breakdown.</li>
+    </ul></div>
+    <div class="card"><h3>2 · Multi-turn replay</h3><ul>
+      <li><code>dialogs_sample.json</code>: 10 dialogs tagged scenario_switch, topic_switch, context_return, multi_intent, mixed_language, clarification, handoff, irreversible_action, language_switch.</li>
+      <li>Replay client turns through <code>Engine.Process</code>; compare the chosen scenario per turn and the status (awaiting_slot / awaiting_confirmation / handoff).</li>
+      <li>This is the only test of the things the case is actually about.</li>
+    </ul></div>
+    <div class="card"><h3>3 · Latency histograms</h3><ul>
+      <li>Per path, per stage, p50 / p95, from the same runs.</li>
+      <li>Prints the hybrid gain as a number: fast-path p50 vs. full-path p50. That number goes on the slide.</li>
+    </ul></div>
+    <div class="card"><h3>4 · Calibration</h3><ul>
+      <li>Sweep each τ over 1 + 2; pick the point that maximises accuracy subject to “no wrong execution of an irreversible action”.</li>
+      <li>Freeze, record in README, re-run before the demo.</li>
+    </ul></div>
+  </div>
+
+  <h2>Where each critique point lands</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Critique</th><th>Stage</th><th>What changes</th></tr></thead>
+    <tbody>
+      <tr><td>Not hybrid</td><td>03 · 04 · 05</td><td>Retrieval shortlist + gate on <code>fast_path_eligible</code> + small-model fast route.</td></tr>
+      <tr><td>Latency structurally bad</td><td>02 · 05 · 09</td><td>Bypass skips the model; prompt shrinks 5–8×; template responses drop the second call.</td></tr>
+      <tr><td>Confidence is invented</td><td>06</td><td>Uncertainty from retrieval margin, agreement and boundary conflict; thresholds calibrated.</td></tr>
+      <tr><td>Multi-turn never evaluated</td><td>outer loop</td><td>Replay harness over <code>dialogs_sample.json</code>.</td></tr>
+      <tr><td>Layer boundary too thin</td><td>00</td><td>Layer 1 sends transcript only; router owns slots.</td></tr>
+      <tr><td>Effort inverted</td><td>08</td><td>Executor frozen; Postgres parked.</td></tr>
+      <tr><td>Rules leaking into the prompt</td><td>05</td><td>Boundaries live in <code>not_this_if</code> data, read per shortlisted scenario.</td></tr>
+      <tr><td>No degraded mode</td><td>ladder</td><td>L0 → L1 → L2 → L3, each visible in the trace.</td></tr>
+      <tr><td>Split decision ownership</td><td>02 · 08</td><td>LLM proposes, Go verifies; deterministic paths only continue a chosen scenario.</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <h2>Scope for the remaining time</h2>
+  <div class="two">
+    <div class="card in"><h3>In</h3><ul>
+      <li>Move the dataset package under <code>backend/</code> so it builds.</li>
+      <li>Stages 02, 03, 04, 05-fast, 06, 09 (templates), trace fields.</li>
+      <li>Fallback ladder L0–L3.</li>
+      <li>Dev harness: single-turn + dialog replay + latency, one command.</li>
+      <li>Web UI with mic → STT → <code>/v1/turns</code> → TTS and the trace panel.</li>
+      <li><code>docker compose up</code> or a single script that starts everything.</li>
+    </ul></div>
+    <div class="card out"><h3>Out</h3><ul>
+      <li>PostgreSQL persistence, leases, advisory locks.</li>
+      <li>New frame semantics in the executor.</li>
+      <li>Catalog editing endpoints.</li>
+      <li>Emotion detection, streaming partial routing.</li>
+      <li>Fine-tuning or any custom model.</li>
+    </ul></div>
+  </div>
+
+  <div class="footer">Companion to <code>DESIGN.md</code> in the repository root. Scenario IDs, slot patterns, response templates and the <code>fast_path_eligible</code> flag are quoted from the organizer dataset <code>voice_router_dataset/</code> v1.0, snapshot date 2026-10-01.</div>
+</main>
+</body>
+</html>

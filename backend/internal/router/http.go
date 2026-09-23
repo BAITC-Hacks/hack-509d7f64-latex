@@ -32,7 +32,7 @@ func Handler(e *Engine, token string, operatorTokens ...string) http.Handler {
 			writeJSON(w, http.StatusServiceUnavailable, Values{"error": "database is not ready"})
 			return
 		}
-		writeJSON(w, http.StatusOK, Values{"status": "ready", "store": "postgresql"})
+		writeJSON(w, http.StatusOK, Values{"status": "ready", "store": "sqlite"})
 	})
 	mux.HandleFunc("POST /v1/turns", func(w http.ResponseWriter, r *http.Request) {
 		var in Input

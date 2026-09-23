@@ -108,11 +108,11 @@ func runModel(ctx context.Context, o options, catalog *router.Catalog) {
 		log.Fatal("Set OPENAI_API_KEY (or pass -env); this mode makes paid API calls")
 	}
 	model := envOr("OPENAI_MODEL", "gpt-4.1-mini")
-	fast := envOr("OPENAI_FAST_MODEL", "gpt-4.1-nano")
+	fast := envOr("OPENAI_FAST_MODEL", "gpt-4.1-mini")
 	openai := router.NewOpenAI(key, model, catalog)
 	openai.FastModel = fast
 	engine := router.NewEngine(catalog, openai, router.NewMemoryRepository(catalog))
-	engine.Policy.FallbackModel = envOr("OPENAI_FALLBACK_MODEL", fast)
+	engine.Policy.FallbackModel = envOr("OPENAI_FALLBACK_MODEL", "gpt-4.1-nano")
 	if o.fullTimeout > 0 {
 		engine.Policy.FullTimeout = o.fullTimeout
 	}

@@ -496,7 +496,9 @@ func decodeDecision(text string) (Decision, error) {
 		}
 		var value any
 		if e := json.Unmarshal([]byte(s.Value), &value); e != nil {
-			return Decision{}, fmt.Errorf("invalid slot JSON")
+			// Models often forget to quote strings (+7 701 000 00 07). Keep
+			// the raw text; sanitizeSlots drops it if it is still invalid.
+			value = strings.TrimSpace(s.Value)
 		}
 		d.Slots[s.Name] = value
 	}

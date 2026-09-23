@@ -48,7 +48,7 @@ type Policy struct {
 }
 
 func DefaultPolicy() Policy {
-	return Policy{ShortlistSize: 8, FastCandidates: 3, FastMargin: .1, FastMinScore: .3, Execute: .25, Handoff: .55, L2Margin: .2, FastTimeout: 1500 * time.Millisecond, FullTimeout: 12 * time.Second}
+	return Policy{ShortlistSize: 8, FastCandidates: 3, FastMargin: .1, FastMinScore: .3, Execute: .25, Handoff: .55, L2Margin: .2, FastTimeout: 3 * time.Second, FullTimeout: 12 * time.Second}
 }
 
 func NewEngine(c *Catalog, m Model, repo Repository) *Engine {

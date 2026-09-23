@@ -3,6 +3,10 @@
 .venv-tts
 .run
 .env
+**/.env
+**/*.db
+**/*.db-wal
+**/*.db-shm
 **/__pycache__
 stt/models
 tts/models

@@ -53,14 +53,16 @@ func main() {
 	cancelStartup()
 	fastModel := os.Getenv("OPENAI_FAST_MODEL")
 	if fastModel == "" {
-		fastModel = "gpt-4.1-nano"
+		// Measured: nano took 2.5-3 s on the small prompt, mini 1.6-2.6 s.
+		fastModel = "gpt-4.1-mini"
 	}
 	openai := router.NewOpenAI(key, model, catalog)
 	openai.FastModel = fastModel
 	engine := router.NewEngine(catalog, openai, repo)
 	engine.Policy.FallbackModel = os.Getenv("OPENAI_FALLBACK_MODEL")
 	if engine.Policy.FallbackModel == "" {
-		engine.Policy.FallbackModel = fastModel
+		// L1 retries on a different model than L0.
+		engine.Policy.FallbackModel = "gpt-4.1-nano"
 	}
 	server := &http.Server{Addr: addr, Handler: router.Handler(engine, apiToken, operatorToken), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 70 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

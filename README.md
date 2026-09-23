@@ -127,7 +127,7 @@ Build a binary with `go build -o voice-router ./cmd/router` from `backend/`.
 | --- | --- | --- |
 | `OPENAI_API_KEY` | required | The router exits without it. It stays on the server and never appears in traces. |
 | `OPENAI_MODEL` | `gpt-4.1-mini` | Main model: full route and answer wording. |
-| `OPENAI_FAST_MODEL` | `gpt-4.1-nano` | Small model for the fast route. |
+| `OPENAI_FAST_MODEL` | `gpt-4.1-mini` | Fast-route model (candidates-only prompt; nano measured slower). |
 | `OPENAI_FALLBACK_MODEL` | `OPENAI_FAST_MODEL` | Fallback rung L1: repeats the failed full route on this model. |
 | `DB_PATH` | `voice_router.db` | SQLite file, relative to the working directory (`/data/voice_router.db` in Docker). Must not contain `?`. |
 | `LISTEN_ADDR` | `127.0.0.1:8080` | Listen address (`0.0.0.0:8080` in Docker). |
@@ -500,15 +500,10 @@ review outcomes, tool operations and workflow progression for diagnosis.
 
 All 31 catalog actions use the supplied mock business records and knowledge
 base. The fixture reference date is **2026-10-01**. Mutable mock records and ID
-<<<<<<< HEAD
 allocation live in SQLite as one JSON document (`mock_backend_state`), seeded
-from the dataset by migration 002. Each tool call reads and rewrites it inside
-its own write transaction; the read-only `mock_*` views expose it to `sqlite3`.
-=======
-allocation live in the SQLite `mock_backend_state` row, seeded once from the
-dataset. Every tool call reads and writes it inside the same transaction as its
-receipt and the turn checkpoint.
->>>>>>> worktree-wf_04e92431-b12-3
+once from the dataset by migration 002. Every tool call reads and writes it inside
+the same transaction as its receipt and the turn checkpoint; the read-only
+`mock_*` views expose it to `sqlite3`.
 
 The chat frontend displays the returned scenarios and trace (`chat/README.md`
 describes how the gateway maps them). Actual telephony transfers are outside

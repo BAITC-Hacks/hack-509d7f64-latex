@@ -3,89 +3,171 @@ package router
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"embed"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-// Postgres owns durable state. A Backend is constructed only inside a tool
-// transaction, from the locked database row; it is never shared across turns.
-type Postgres struct {
-	pool          *pgxpool.Pool
-	catalog       *Catalog
-	lockNamespace string
+// SQLite owns durable state in one database file served by one router process.
+// All statements share a single connection: writers never race each other for
+// the file lock inside the process, and a ":memory:" database stays alive.
+// busy_timeout covers other processes such as cmd/migrate. A Backend is
+// constructed only inside a tool transaction, from the stored row; it is never
+// shared across turns.
+type SQLite struct {
+	db      *sql.DB
+	catalog *Catalog
+	schema  int
+	closed  context.Context
+	close   context.CancelFunc
+	mu      sync.Mutex
+	gates   map[string]*sessionGate
 }
 
-func OpenPostgres(ctx context.Context, databaseURL string, catalog *Catalog) (*Postgres, error) {
-	if databaseURL == "" {
-		return nil, fmt.Errorf("DATABASE_URL is required")
+type sessionGate struct {
+	ch   chan struct{}
+	refs int
+}
+
+// OpenSQLite opens (creating if needed) the database at dbPath and applies
+// pending migrations, so an opened store is always ready. ":memory:" gives a
+// private database that lives until Close.
+func OpenSQLite(ctx context.Context, dbPath string, catalog *Catalog) (*SQLite, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("DB_PATH is required")
+	}
+	if strings.Contains(dbPath, "?") {
+		return nil, fmt.Errorf("DB_PATH must not contain '?'")
 	}
 	if catalog == nil {
 		return nil, fmt.Errorf("catalog is required")
 	}
-	config, err := pgxpool.ParseConfig(databaseURL)
+	ms, err := migrations()
 	if err != nil {
-		return nil, fmt.Errorf("parse DATABASE_URL: %w", err)
+		return nil, err
 	}
-	if config.MaxConns < 16 {
-		config.MaxConns = 16
-	}
-	pool, err := pgxpool.NewWithConfig(ctx, config)
+	// _txlock=immediate takes the write lock at BEGIN, so a transaction that
+	// reads and then writes cannot fail halfway with SQLITE_BUSY.
+	q := url.Values{"_txlock": {"immediate"}, "_pragma": {"busy_timeout(5000)", "foreign_keys(ON)", "journal_mode(WAL)", "synchronous(NORMAL)"}}
+	db, err := sql.Open("sqlite", dbPath+"?"+q.Encode())
 	if err != nil {
 		return nil, databaseError(err)
 	}
-	if err = pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, databaseError(err)
+	db.SetMaxOpenConns(1)
+	closed, cancel := context.WithCancel(context.Background())
+	p := &SQLite{db: db, catalog: catalog, schema: ms[len(ms)-1].version, closed: closed, close: cancel, gates: map[string]*sessionGate{}}
+	if err = p.connect(ctx); err == nil {
+		err = p.Migrate(ctx)
 	}
-	var schema string
-	if err = pool.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
-		pool.Close()
-		return nil, databaseError(err)
+	if err != nil {
+		p.Close()
+		return nil, err
 	}
-	return &Postgres{pool: pool, catalog: catalog, lockNamespace: schema}, nil
+	return p, nil
 }
 
-func (p *Postgres) Close() { p.pool.Close() }
+// connect opens the connection. Switching a new file to WAL needs an exclusive
+// lock that SQLite does not wait for via busy_timeout, so concurrent first
+// opens (router and cmd/migrate) retry here for up to the same 5 s.
+func (p *SQLite) connect(ctx context.Context) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := p.db.PingContext(ctx)
+		var e *sqlite.Error
+		if err == nil || !errors.As(err, &e) || e.Code()&0xff != sqlite3.SQLITE_BUSY || time.Now().After(deadline) {
+			return databaseError(err)
+		}
+		select {
+		case <-ctx.Done():
+			return databaseError(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
 
-func (p *Postgres) Migrate(ctx context.Context) error {
-	tx, err := p.pool.Begin(ctx)
+// Close cancels every outstanding lease, so in-flight model calls stop instead
+// of writing afterwards, then closes the database. It is idempotent.
+func (p *SQLite) Close() {
+	p.close()
+	if err := p.db.Close(); err != nil {
+		slog.Warn("closing SQLite store", "error", err)
+	}
+}
+
+type migration struct {
+	version int
+	sql     string
+}
+
+// migrations returns the embedded files in name order; names start with a
+// zero-padded version number.
+func migrations() ([]migration, error) {
+	entries, err := migrationFiles.ReadDir("migrations")
+	if err != nil {
+		return nil, err
+	}
+	var out []migration
+	for _, entry := range entries {
+		name := entry.Name()
+		version, err := strconv.Atoi(strings.SplitN(name, "_", 2)[0])
+		if err != nil {
+			return nil, fmt.Errorf("migration %s: %w", name, err)
+		}
+		b, err := migrationFiles.ReadFile("migrations/" + name)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, migration{version, string(b)})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no migrations embedded")
+	}
+	return out, nil
+}
+
+// Migrate applies pending migrations and seeds the synthetic backend once; a
+// later call never overwrites mutated business records. BEGIN IMMEDIATE
+// serializes concurrent migrators on the same file.
+func (p *SQLite) Migrate(ctx context.Context) error {
+	ms, err := migrations()
+	if err != nil {
+		return err
+	}
+	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return databaseError(err)
 	}
-	defer tx.Rollback(context.Background())
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, advisoryKey("voice-router:"+p.lockNamespace+":migrations")); err != nil {
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS router_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))`); err != nil {
 		return databaseError(err)
 	}
-	if _, err = tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS router_schema_migrations (version integer PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`); err != nil {
-		return databaseError(err)
-	}
-	var exists bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM router_schema_migrations WHERE version = 1)`).Scan(&exists); err != nil {
-		return databaseError(err)
-	}
-	if !exists {
-		migration, readErr := migrationFiles.ReadFile("migrations/001_durable_router.sql")
-		if readErr != nil {
-			return readErr
-		}
-		if _, err = tx.Exec(ctx, string(migration)); err != nil {
+	for _, m := range ms {
+		var exists bool
+		if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM router_schema_migrations WHERE version=?)`, m.version).Scan(&exists); err != nil {
 			return databaseError(err)
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO router_schema_migrations(version) VALUES(1)`); err != nil {
+		if exists {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, m.sql); err != nil {
+			return databaseError(err)
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO router_schema_migrations(version) VALUES(?)`, m.version); err != nil {
 			return databaseError(err)
 		}
 	}
@@ -93,15 +175,15 @@ func (p *Postgres) Migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO mock_backend_state(id, data, sequence) VALUES(1, $1, 900000) ON CONFLICT(id) DO NOTHING`, seed); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO mock_backend_state(id, data, sequence, updated_at) VALUES(1, ?, 900000, ?) ON CONFLICT(id) DO NOTHING`, string(seed), stamp(time.Now())); err != nil {
 		return databaseError(err)
 	}
-	return databaseError(tx.Commit(ctx))
+	return databaseError(tx.Commit())
 }
 
-func (p *Postgres) Ready(ctx context.Context) error {
+func (p *SQLite) Ready(ctx context.Context) error {
 	var ready bool
-	err := p.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM router_schema_migrations WHERE version=1) AND EXISTS(SELECT 1 FROM mock_backend_state WHERE id=1)`).Scan(&ready)
+	err := p.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM router_schema_migrations WHERE version=?) AND EXISTS(SELECT 1 FROM mock_backend_state WHERE id=1)`, p.schema).Scan(&ready)
 	if err != nil {
 		return databaseError(err)
 	}
@@ -111,161 +193,112 @@ func (p *Postgres) Ready(ctx context.Context) error {
 	return nil
 }
 
-func advisoryKey(id string) int64 {
-	sum := sha256.Sum256([]byte(id))
-	return int64(binary.BigEndian.Uint64(sum[:8]))
-}
+func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
-type postgresLease struct {
-	owner    *Postgres
-	conn     *pgxpool.Conn
+type sqliteLease struct {
+	owner    *SQLite
 	id       string
-	key      int64
+	gate     *sessionGate
 	ctx      context.Context
 	cancel   context.CancelFunc
-	done     chan struct{}
+	stop     func() bool
 	mu       sync.Mutex
 	released bool
-	lost     bool
 }
 
-func (p *Postgres) Lock(ctx context.Context, id string) (Lease, error) {
-	conn, err := p.pool.Acquire(ctx)
-	if err != nil {
-		return nil, databaseError(err)
+// Lock gives exclusive ownership of a session within this process and waits
+// for the current owner until ctx ends. A second process on the same file is
+// not excluded here; Save's version check still rejects its stale writes.
+func (p *SQLite) Lock(ctx context.Context, id string) (Lease, error) {
+	p.mu.Lock()
+	g := p.gates[id]
+	if g == nil {
+		g = &sessionGate{ch: make(chan struct{}, 1)}
+		p.gates[id] = g
 	}
-	key := advisoryKey("voice-router:" + p.lockNamespace + ":session:" + id)
-	var locked bool
-	if err = conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&locked); err != nil {
-		closePooledConnection(conn)
-		return nil, databaseError(err)
-	}
-	if !locked {
-		conn.Release()
-		return nil, ErrBusy
+	g.refs++
+	p.mu.Unlock()
+	select {
+	case g.ch <- struct{}{}:
+	case <-ctx.Done():
+		p.unref(id, g)
+		return nil, fmt.Errorf("%w: %w", ErrBusy, ctx.Err())
 	}
 	initial, err := sessionJSON(initialSession(id))
 	if err == nil {
-		_, err = conn.Exec(ctx, `INSERT INTO sessions(id,state) VALUES($1,$2) ON CONFLICT(id) DO NOTHING`, id, initial)
+		_, err = p.db.ExecContext(ctx, `INSERT INTO sessions(id, state, updated_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING`, id, string(initial), stamp(time.Now()))
 	}
 	if err != nil {
-		closePooledConnection(conn)
+		<-g.ch
+		p.unref(id, g)
 		return nil, databaseError(err)
 	}
-	lctx, cancel := context.WithCancel(ctx)
-	l := &postgresLease{owner: p, conn: conn, id: id, key: key, ctx: lctx, cancel: cancel, done: make(chan struct{})}
-	go l.watch()
+	l := &sqliteLease{owner: p, id: id, gate: g}
+	l.ctx, l.cancel = context.WithCancel(ctx)
+	l.stop = context.AfterFunc(p.closed, l.cancel)
 	return l, nil
 }
 
-func (l *postgresLease) Context() context.Context { return l.ctx }
-
-func (l *postgresLease) watch() {
-	defer close(l.done)
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-l.ctx.Done():
-			return
-		case <-ticker.C:
-			if !l.mu.TryLock() {
-				continue
-			}
-			if l.released || l.lost {
-				l.mu.Unlock()
-				return
-			}
-			ctx, cancel := context.WithTimeout(l.ctx, 2*time.Second)
-			err := l.conn.Ping(ctx)
-			cancel()
-			if err != nil {
-				l.lost = true
-				l.cancel()
-			}
-			l.mu.Unlock()
-			if err != nil {
-				return
-			}
-		}
+func (p *SQLite) unref(id string, g *sessionGate) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if g.refs--; g.refs == 0 {
+		delete(p.gates, id)
 	}
 }
 
-func (l *postgresLease) check() error {
-	if l.released || l.lost || l.conn.Conn().IsClosed() {
-		l.lost = true
-		l.cancel()
+func (l *sqliteLease) Context() context.Context { return l.ctx }
+
+func (l *sqliteLease) check() error {
+	if l.released || l.owner.closed.Err() != nil {
 		return fmt.Errorf("%w: session lease lost", ErrDatabase)
 	}
-	if err := l.ctx.Err(); err != nil {
-		return err
-	}
-	return nil
+	return l.ctx.Err()
 }
 
-func (l *postgresLease) Release() {
-	l.cancel()
-	<-l.done
+func (l *sqliteLease) Release() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.released {
 		return
 	}
 	l.released = true
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	var unlocked bool
-	err := l.conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, l.key).Scan(&unlocked)
-	if err != nil || !unlocked {
-		slog.Warn("discarding PostgreSQL lease connection", "unlock_error", err)
-		closePooledConnection(l.conn)
-		return
-	}
-	l.conn.Release()
-}
-
-func closePooledConnection(conn *pgxpool.Conn) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = conn.Hijack().Close(ctx)
+	l.stop()
+	l.cancel()
+	<-l.gate.ch
+	l.owner.unref(l.id, l.gate)
 }
 
 type queryer interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
 func initialSession(id string) Session {
 	return Session{ID: id, Language: "ru", Identity: Values{}, Stack: []*Frame{}, Queue: []*Frame{}, Turns: []Turn{}}
 }
 
-func (l *postgresLease) Load(ctx context.Context) (Session, error) {
+func (l *sqliteLease) Load(ctx context.Context) (Session, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.check(); err != nil {
 		return Session{}, err
 	}
-	data, err := sessionJSON(initialSession(l.id))
-	if err != nil {
-		return Session{}, err
-	}
-	if _, err = l.conn.Exec(ctx, `INSERT INTO sessions(id, state) VALUES($1,$2) ON CONFLICT(id) DO NOTHING`, l.id, data); err != nil {
-		return Session{}, databaseError(err)
-	}
-	return loadSession(ctx, l.conn, l.id)
+	return loadSession(ctx, l.owner.db, l.id)
 }
 
-func (p *Postgres) Get(ctx context.Context, id string) (Session, error) {
-	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+func (p *SQLite) Get(ctx context.Context, id string) (Session, error) {
+	// A read transaction keeps the session row and its history consistent.
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return Session{}, databaseError(err)
 	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback()
 	s, err := loadSession(ctx, tx, id)
 	if err != nil {
 		return Session{}, err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = tx.Commit(); err != nil {
 		return Session{}, databaseError(err)
 	}
 	return s, nil
@@ -274,9 +307,9 @@ func (p *Postgres) Get(ctx context.Context, id string) (Session, error) {
 func loadSession(ctx context.Context, q queryer, id string) (Session, error) {
 	var data []byte
 	var version int64
-	var updated time.Time
-	err := q.QueryRow(ctx, `SELECT state, version, updated_at FROM sessions WHERE id=$1`, id).Scan(&data, &version, &updated)
-	if errors.Is(err, pgx.ErrNoRows) {
+	var updated string
+	err := q.QueryRowContext(ctx, `SELECT state, version, updated_at FROM sessions WHERE id=?`, id).Scan(&data, &version, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
 		return Session{}, ErrNotFound
 	}
 	if err != nil {
@@ -286,8 +319,11 @@ func loadSession(ctx context.Context, q queryer, id string) (Session, error) {
 	if err = json.Unmarshal(data, &s); err != nil {
 		return Session{}, databaseError(err)
 	}
-	s.Version, s.UpdatedAt, s.Turns = version, updated, []Turn{}
-	rows, err := q.Query(ctx, `SELECT input, final_output FROM (SELECT id,input,final_output FROM turns WHERE session_id=$1 AND phase='finished' ORDER BY id DESC LIMIT 10) recent ORDER BY id`, id)
+	if s.UpdatedAt, err = time.Parse(time.RFC3339Nano, updated); err != nil {
+		return Session{}, databaseError(err)
+	}
+	s.Version, s.Turns = version, []Turn{}
+	rows, err := q.QueryContext(ctx, `SELECT input, final_output FROM (SELECT id, input, final_output FROM turns WHERE session_id=? AND phase='finished' ORDER BY id DESC LIMIT 10) recent ORDER BY id`, id)
 	if err != nil {
 		return Session{}, databaseError(err)
 	}
@@ -324,7 +360,7 @@ func digest(v any) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
-func (l *postgresLease) Begin(ctx context.Context, in Input) (Run, bool, error) {
+func (l *sqliteLease) Begin(ctx context.Context, in Input) (Run, bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.check(); err != nil {
@@ -340,14 +376,14 @@ func (l *postgresLease) Begin(ctx context.Context, in Input) (Run, bool, error) 
 	if err != nil {
 		return Run{}, false, err
 	}
-	tx, err := l.conn.Begin(ctx)
+	tx, err := l.owner.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Run{}, false, databaseError(err)
 	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback()
 	var previousHash string
 	var data []byte
-	err = tx.QueryRow(ctx, `SELECT input_fingerprint, checkpoint FROM turns WHERE session_id=$1 AND request_id=$2`, l.id, in.RequestID).Scan(&previousHash, &data)
+	err = tx.QueryRowContext(ctx, `SELECT input_fingerprint, checkpoint FROM turns WHERE session_id=? AND request_id=?`, l.id, in.RequestID).Scan(&previousHash, &data)
 	if err == nil {
 		if hash != previousHash {
 			return Run{}, false, ErrConflict
@@ -358,11 +394,11 @@ func (l *postgresLease) Begin(ctx context.Context, in Input) (Run, bool, error) 
 		}
 		return run, true, nil
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return Run{}, false, databaseError(err)
 	}
 	var busy bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=$1 AND phase <> 'finished')`, l.id).Scan(&busy); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=? AND phase <> 'finished')`, l.id).Scan(&busy); err != nil {
 		return Run{}, false, databaseError(err)
 	}
 	if busy {
@@ -377,13 +413,14 @@ func (l *postgresLease) Begin(ctx context.Context, in Input) (Run, bool, error) 
 	if err != nil {
 		return Run{}, false, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO turns(session_id, request_id, input_fingerprint, input, phase, checkpoint) VALUES($1,$2,$3,$4,$5,$6)`, l.id, in.RequestID, hash, input, run.Phase, data); err != nil {
+	now := stamp(time.Now())
+	if _, err = tx.ExecContext(ctx, `INSERT INTO turns(session_id, request_id, input_fingerprint, input, phase, checkpoint, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)`, l.id, in.RequestID, hash, string(input), run.Phase, string(data), now, now); err != nil {
 		return Run{}, false, databaseError(err)
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO turn_events(session_id, request_id, kind, data) VALUES($1,$2,'received',$3)`, l.id, in.RequestID, input); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO turn_events(session_id, request_id, kind, data, created_at) VALUES(?,?,'received',?,?)`, l.id, in.RequestID, string(input), now); err != nil {
 		return Run{}, false, databaseError(err)
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = tx.Commit(); err != nil {
 		return Run{}, false, databaseError(err)
 	}
 	return run, false, nil
@@ -391,8 +428,8 @@ func (l *postgresLease) Begin(ctx context.Context, in Input) (Run, bool, error) 
 
 func getRun(ctx context.Context, q queryer, sessionID, requestID string) (Run, error) {
 	var data []byte
-	err := q.QueryRow(ctx, `SELECT checkpoint FROM turns WHERE session_id=$1 AND request_id=$2`, sessionID, requestID).Scan(&data)
-	if errors.Is(err, pgx.ErrNoRows) {
+	err := q.QueryRowContext(ctx, `SELECT checkpoint FROM turns WHERE session_id=? AND request_id=?`, sessionID, requestID).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrNotFound
 	}
 	if err != nil {
@@ -404,16 +441,16 @@ func getRun(ctx context.Context, q queryer, sessionID, requestID string) (Run, e
 	}
 	return run, nil
 }
-func (p *Postgres) GetTurn(ctx context.Context, sid, rid string) (Run, error) {
-	return getRun(ctx, p.pool, sid, rid)
+func (p *SQLite) GetTurn(ctx context.Context, sid, rid string) (Run, error) {
+	return getRun(ctx, p.db, sid, rid)
 }
-func (l *postgresLease) GetRun(ctx context.Context, rid string) (Run, error) {
+func (l *sqliteLease) GetRun(ctx context.Context, rid string) (Run, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.check(); err != nil {
 		return Run{}, err
 	}
-	return getRun(ctx, l.conn, l.id, rid)
+	return getRun(ctx, l.owner.db, l.id, rid)
 }
 
 func sessionJSON(s Session) ([]byte, error) {
@@ -430,15 +467,32 @@ func sessionJSON(s Session) ([]byte, error) {
 	return json.Marshal(fields)
 }
 
+// oneRow requires a statement to have changed exactly one row; anything else
+// means the caller's checkpoint is stale.
+func oneRow(res sql.Result, err error) error {
+	if err != nil {
+		return databaseError(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return databaseError(err)
+	}
+	if n != 1 {
+		return ErrConflict
+	}
+	return nil
+}
+
 // saveTx checks the caller's checkpoint version before updating any durable
 // state. Only the transaction's caller publishes the incremented version.
-func (l *postgresLease) saveTx(ctx context.Context, tx pgx.Tx, s *Session, r *Run, event *Event) (Session, error) {
+func (l *sqliteLease) saveTx(ctx context.Context, tx *sql.Tx, s *Session, r *Run, event *Event) (Session, error) {
 	if s.ID != l.id || r.Input.SessionID != l.id {
 		return Session{}, ErrConflict
 	}
 	next := *s
 	next.Version++
 	next.UpdatedAt = time.Now().UTC()
+	now := stamp(next.UpdatedAt)
 	snapshot, err := sessionJSON(next)
 	if err != nil {
 		return Session{}, err
@@ -457,28 +511,20 @@ func (l *postgresLease) saveTx(ctx context.Context, tx pgx.Tx, s *Session, r *Ru
 		if marshalErr != nil {
 			return Session{}, marshalErr
 		}
-		final = b
+		final = string(b)
 	}
-	tag, err := tx.Exec(ctx, `UPDATE sessions SET state=$2, version=$3, updated_at=$4 WHERE id=$1 AND version=$5`, l.id, snapshot, next.Version, next.UpdatedAt, s.Version)
-	if err != nil {
-		return Session{}, databaseError(err)
+	if err = oneRow(tx.ExecContext(ctx, `UPDATE sessions SET state=?, version=?, updated_at=? WHERE id=? AND version=?`, string(snapshot), next.Version, now, l.id, s.Version)); err != nil {
+		return Session{}, err
 	}
-	if tag.RowsAffected() != 1 {
-		return Session{}, ErrConflict
-	}
-	tag, err = tx.Exec(ctx, `UPDATE turns SET checkpoint=$3, phase=$4, final_output=$5, updated_at=now() WHERE session_id=$1 AND request_id=$2 AND input_fingerprint=$6`, l.id, r.Input.RequestID, checkpoint, r.Phase, final, hash)
-	if err != nil {
-		return Session{}, databaseError(err)
-	}
-	if tag.RowsAffected() != 1 {
-		return Session{}, ErrConflict
+	if err = oneRow(tx.ExecContext(ctx, `UPDATE turns SET checkpoint=?, phase=?, final_output=?, updated_at=? WHERE session_id=? AND request_id=? AND input_fingerprint=?`, string(checkpoint), r.Phase, final, now, l.id, r.Input.RequestID, hash)); err != nil {
+		return Session{}, err
 	}
 	if r.Review != nil {
 		review, marshalErr := json.Marshal(r.Review)
 		if marshalErr != nil {
 			return Session{}, marshalErr
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO intent_reviews(session_id,request_id,proposal_id,revision,target,status,proposal) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(session_id,request_id,proposal_id,revision) DO UPDATE SET status=excluded.status,proposal=excluded.proposal,updated_at=now()`, l.id, r.Input.RequestID, r.Review.ProposalID, r.Review.Revision, r.Review.Target, r.Review.Status, review)
+		_, err = tx.ExecContext(ctx, `INSERT INTO intent_reviews(session_id, request_id, proposal_id, revision, target, status, proposal, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id, request_id, proposal_id, revision) DO UPDATE SET status=excluded.status, proposal=excluded.proposal, updated_at=excluded.updated_at`, l.id, r.Input.RequestID, r.Review.ProposalID, r.Review.Revision, r.Review.Target, r.Review.Status, string(review), now, now)
 		if err != nil {
 			return Session{}, databaseError(err)
 		}
@@ -488,36 +534,36 @@ func (l *postgresLease) saveTx(ctx context.Context, tx pgx.Tx, s *Session, r *Ru
 		if marshalErr != nil {
 			return Session{}, marshalErr
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO turn_events(session_id,request_id,kind,data) VALUES($1,$2,$3,$4)`, l.id, r.Input.RequestID, event.Kind, data); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO turn_events(session_id, request_id, kind, data, created_at) VALUES(?,?,?,?,?)`, l.id, r.Input.RequestID, event.Kind, string(data), now); err != nil {
 			return Session{}, databaseError(err)
 		}
 	}
 	return next, nil
 }
 
-func (l *postgresLease) Save(ctx context.Context, s *Session, r *Run, event *Event) error {
+func (l *sqliteLease) Save(ctx context.Context, s *Session, r *Run, event *Event) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.check(); err != nil {
 		return err
 	}
-	tx, err := l.conn.Begin(ctx)
+	tx, err := l.owner.db.BeginTx(ctx, nil)
 	if err != nil {
 		return databaseError(err)
 	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback()
 	next, err := l.saveTx(ctx, tx, s, r, event)
 	if err != nil {
 		return err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = tx.Commit(); err != nil {
 		return databaseError(err)
 	}
 	s.Version, s.UpdatedAt = next.Version, next.UpdatedAt
 	return nil
 }
 
-func (l *postgresLease) Tool(ctx context.Context, s *Session, r *Run, operationID, name string, args Values, apply func(Values)) error {
+func (l *sqliteLease) Tool(ctx context.Context, s *Session, r *Run, operationID, name string, args Values, apply func(Values)) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.check(); err != nil {
@@ -530,15 +576,15 @@ func (l *postgresLease) Tool(ctx context.Context, s *Session, r *Run, operationI
 	if err != nil {
 		return err
 	}
-	tx, err := l.conn.Begin(ctx)
+	tx, err := l.owner.db.BeginTx(ctx, nil)
 	if err != nil {
 		return databaseError(err)
 	}
-	defer tx.Rollback(context.Background())
+	defer tx.Rollback()
 	var result Values
 	var previousHash string
 	var data []byte
-	err = tx.QueryRow(ctx, `SELECT arguments_fingerprint,result FROM tool_executions WHERE session_id=$1 AND request_id=$2 AND operation_id=$3`, l.id, r.Input.RequestID, operationID).Scan(&previousHash, &data)
+	err = tx.QueryRowContext(ctx, `SELECT arguments_fingerprint, result FROM tool_executions WHERE session_id=? AND request_id=? AND operation_id=?`, l.id, r.Input.RequestID, operationID).Scan(&previousHash, &data)
 	if err == nil {
 		if previousHash != hash {
 			return ErrConflict
@@ -546,9 +592,11 @@ func (l *postgresLease) Tool(ctx context.Context, s *Session, r *Run, operationI
 		if err = json.Unmarshal(data, &result); err != nil {
 			return databaseError(err)
 		}
-	} else if errors.Is(err, pgx.ErrNoRows) {
+	} else if errors.Is(err, sql.ErrNoRows) {
+		// BEGIN IMMEDIATE already holds the write lock, so the read-modify-write
+		// of the business state cannot interleave with another tool call.
 		var seq int
-		if err = tx.QueryRow(ctx, `SELECT data,sequence FROM mock_backend_state WHERE id=1 FOR UPDATE`).Scan(&data, &seq); err != nil {
+		if err = tx.QueryRowContext(ctx, `SELECT data, sequence FROM mock_backend_state WHERE id=1`).Scan(&data, &seq); err != nil {
 			return databaseError(err)
 		}
 		var backendData Values
@@ -561,7 +609,8 @@ func (l *postgresLease) Tool(ctx context.Context, s *Session, r *Run, operationI
 		if marshalErr != nil {
 			return marshalErr
 		}
-		if _, err = tx.Exec(ctx, `UPDATE mock_backend_state SET data=$1,sequence=$2,updated_at=now() WHERE id=1`, state, backend.seq); err != nil {
+		now := stamp(time.Now())
+		if _, err = tx.ExecContext(ctx, `UPDATE mock_backend_state SET data=?, sequence=?, updated_at=? WHERE id=1`, string(state), backend.seq, now); err != nil {
 			return databaseError(err)
 		}
 		data, err = json.Marshal(result)
@@ -572,7 +621,7 @@ func (l *postgresLease) Tool(ctx context.Context, s *Session, r *Run, operationI
 		if marshalErr != nil {
 			return marshalErr
 		}
-		if _, err = tx.Exec(ctx, `INSERT INTO tool_executions(session_id,request_id,operation_id,name,arguments_fingerprint,arguments,result) VALUES($1,$2,$3,$4,$5,$6,$7)`, l.id, r.Input.RequestID, operationID, name, hash, arguments, data); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO tool_executions(session_id, request_id, operation_id, name, arguments_fingerprint, arguments, result, created_at) VALUES(?,?,?,?,?,?,?,?)`, l.id, r.Input.RequestID, operationID, name, hash, string(arguments), string(data), now); err != nil {
 			return databaseError(err)
 		}
 	} else {
@@ -590,7 +639,7 @@ func (l *postgresLease) Tool(ctx context.Context, s *Session, r *Run, operationI
 	if err != nil {
 		return err
 	}
-	if err = tx.Commit(ctx); err != nil {
+	if err = tx.Commit(); err != nil {
 		return databaseError(err)
 	}
 	s.Version, s.UpdatedAt = next.Version, next.UpdatedAt
@@ -598,16 +647,18 @@ func (l *postgresLease) Tool(ctx context.Context, s *Session, r *Run, operationI
 	return nil
 }
 
+// databaseError maps unique-key violations to ErrConflict (a concurrent writer
+// got there first) and everything else to ErrDatabase.
 func databaseError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var pgerr *pgconn.PgError
-	if errors.As(err, &pgerr) && pgerr.Code == "23505" {
+	var e *sqlite.Error
+	if errors.As(err, &e) && (e.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE || e.Code() == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY) {
 		return fmt.Errorf("%w: %w", ErrConflict, err)
 	}
 	return fmt.Errorf("%w: %w", ErrDatabase, err)
 }
 
-var _ Repository = (*Postgres)(nil)
-var _ Lease = (*postgresLease)(nil)
+var _ Repository = (*SQLite)(nil)
+var _ Lease = (*sqliteLease)(nil)

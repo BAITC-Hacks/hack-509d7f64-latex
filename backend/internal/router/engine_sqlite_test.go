@@ -2,64 +2,32 @@ package router
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
+	"path/filepath"
+	"sync"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
-func engineDatabase(t *testing.T) (*Catalog, *Postgres, string) {
+// engineDatabase opens a migrated store in a fresh file; the returned path
+// reopens the same database to simulate a restart.
+func engineDatabase(t *testing.T) (*Catalog, *SQLite, string) {
 	t.Helper()
-	base := os.Getenv("TEST_DATABASE_URL")
-	if base == "" {
-		t.Skip("set TEST_DATABASE_URL for PostgreSQL integration tests")
-	}
-	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var suffix [16]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatal(err)
-	}
-	schema := fmt.Sprintf("engine_test_%x", suffix)
-	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
-		admin.Close(ctx)
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec(ctx, "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE")
-		_ = admin.Close(ctx)
-	})
-	parsed, err := url.Parse(base)
-	if err != nil {
-		t.Fatal(err)
-	}
-	q := parsed.Query()
-	q.Set("search_path", schema)
-	parsed.RawQuery = q.Encode()
+	path := filepath.Join(t.TempDir(), "router.db")
 	c, err := LoadCatalog()
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := OpenPostgres(ctx, parsed.String(), c)
+	p, err := OpenSQLite(context.Background(), path, c)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(p.Close)
-	if err := p.Migrate(ctx); err != nil {
-		t.Fatal(err)
-	}
-	return c, p, parsed.String()
+	return c, p, path
 }
-func TestPostgresReviewAndBusinessStateSurviveRestart(t *testing.T) {
-	c, p, dsn := engineDatabase(t)
+func TestSQLiteReviewAndBusinessStateSurviveRestart(t *testing.T) {
+	c, p, path := engineDatabase(t)
 	m := &fakeModel{decisions: []Decision{decision("SC29", Values{"phone": "+77010000003", "contact_field": "email", "new_value": "durable@mail.example"})}}
 	e := NewEngine(c, m, p)
 	in := input("initial", "Изменить почту")
@@ -69,7 +37,7 @@ func TestPostgresReviewAndBusinessStateSurviveRestart(t *testing.T) {
 		t.Fatal(first, err)
 	}
 	p.Close()
-	restarted, err := OpenPostgres(context.Background(), dsn, c)
+	restarted, err := OpenSQLite(context.Background(), path, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +100,7 @@ func (l *failAfterToolLease) Tool(ctx context.Context, s *Session, r *Run, op, n
 	}
 	return err
 }
-func TestPostgresResumeAfterCommittedMutation(t *testing.T) {
+func TestSQLiteResumeAfterCommittedMutation(t *testing.T) {
 	c, p, _ := engineDatabase(t)
 	faults := &failAfterToolRepo{Repository: p, name: "update_contact"}
 	m := &fakeModel{decisions: []Decision{decision("SC29", Values{"phone": "+77010000003", "contact_field": "email", "new_value": "once@mail.example"}), decision("SC29", Values{})}}
@@ -163,7 +131,7 @@ func TestPostgresResumeAfterCommittedMutation(t *testing.T) {
 		t.Fatal("mutation repeated", count)
 	}
 }
-func TestPostgresInputCheckpointResumes(t *testing.T) {
+func TestSQLiteInputCheckpointResumes(t *testing.T) {
 	c, p, _ := engineDatabase(t)
 	ctx := context.Background()
 	in := input("one", "Офис в Алматы")
@@ -182,29 +150,64 @@ func TestPostgresInputCheckpointResumes(t *testing.T) {
 		t.Fatal(out, err)
 	}
 }
-func TestPostgresLockAcrossInstances(t *testing.T) {
-	c, p, dsn := engineDatabase(t)
-	other, err := OpenPostgres(context.Background(), dsn, c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Close()
+
+// SQLite serves one process, so ownership is an in-process gate: a second
+// owner waits for Release or gives up with ErrBusy when its context ends.
+func TestSQLiteLockIsExclusivePerSession(t *testing.T) {
+	_, p, _ := engineDatabase(t)
 	l, err := p.Lock(context.Background(), "shared")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer l.Release()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if second, err := other.Lock(ctx, "shared"); err == nil {
+	if second, err := p.Lock(ctx, "shared"); err == nil {
 		second.Release()
-		t.Fatal("two processes own same session")
+		t.Fatal("two owners of the same session")
+	} else if !errors.Is(err, ErrBusy) {
+		t.Fatal(err)
 	}
-	unrelated, err := other.Lock(ctx, "unrelated")
+	unrelated, err := p.Lock(context.Background(), "unrelated")
 	if err != nil {
 		t.Fatal("unrelated session blocked", err)
 	}
 	unrelated.Release()
+	type result struct {
+		lease Lease
+		err   error
+	}
+	waiter := make(chan result, 1)
+	go func() {
+		next, err := p.Lock(context.Background(), "shared")
+		waiter <- result{next, err}
+	}()
+	select {
+	case <-waiter:
+		t.Fatal("waiter acquired a held session")
+	case <-time.After(50 * time.Millisecond):
+	}
+	l.Release()
+	select {
+	case got := <-waiter:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		got.lease.Release()
+	case <-time.After(2 * time.Second):
+		t.Fatal("release did not wake the waiter")
+	}
+	if l.Context().Err() == nil {
+		t.Fatal("released lease context still live")
+	}
+	if _, err := l.Load(context.Background()); !errors.Is(err, ErrDatabase) {
+		t.Fatal("released lease accepted work", err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.gates) != 0 {
+		t.Fatal("session gates leaked", len(p.gates))
+	}
 }
 
 type stopAfterProposalModel struct{ fakeModel }
@@ -221,7 +224,7 @@ func (m *stopAfterProposalModel) Route(ctx context.Context, in Input, s Session,
 	return Decision{}, ErrDatabase
 }
 
-func TestPostgresCompletedProposalResumesWithoutModelCall(t *testing.T) {
+func TestSQLiteCompletedProposalResumesWithoutModelCall(t *testing.T) {
 	c, p, _ := engineDatabase(t)
 	m := &stopAfterProposalModel{fakeModel: fakeModel{decisions: []Decision{decision("SC33", Values{"city": "Almaty"})}}}
 	in := input("proposal", "Адрес офиса")
@@ -238,5 +241,89 @@ func TestPostgresCompletedProposalResumesWithoutModelCall(t *testing.T) {
 	out, err := restarted.Process(context.Background(), in)
 	if err != nil || out.Status != "completed" || m2.calls != 0 || !actionExecuted(out, "get_offices") {
 		t.Fatal("resume repeated or lost the model proposal", out, err, m2.calls)
+	}
+}
+
+func TestSQLiteConcurrentDuplicateRunsOnce(t *testing.T) {
+	c, p, _ := engineDatabase(t)
+	var ds []Decision
+	for i := 0; i < 12; i++ {
+		ds = append(ds, decision("SC33", Values{"city": "Almaty"}))
+	}
+	m := &fakeModel{decisions: ds}
+	e := NewEngine(c, m, p)
+	var wg sync.WaitGroup
+	outs, errs := make([]Output, 12), make([]error, 12)
+	for i := range outs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outs[i], errs[i] = e.Process(context.Background(), input("same", "office"))
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !equalJSON(outs[i], outs[0]) {
+			t.Fatal("duplicate returned a different answer")
+		}
+	}
+	if m.calls != 1 {
+		t.Fatal("concurrent duplicate processed more than once", m.calls)
+	}
+}
+
+func TestSQLiteSeparateSessionsAreIsolated(t *testing.T) {
+	c, p, _ := engineDatabase(t)
+	var ds []Decision
+	for i := 0; i < 10; i++ {
+		ds = append(ds, decision("SC33", Values{"city": "Almaty"}))
+	}
+	m := &fakeModel{decisions: ds}
+	e := NewEngine(c, m, p)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			in := input("one", "office")
+			in.SessionID = fmt.Sprintf("session-%d", i)
+			if _, err := e.Process(context.Background(), in); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if m.calls != 10 {
+		t.Fatal(m.calls)
+	}
+	for i := 0; i < 10; i++ {
+		s, err := p.Get(context.Background(), fmt.Sprintf("session-%d", i))
+		if err != nil || len(s.Turns) != 1 || s.Turns[0].Output.Status != "completed" {
+			t.Fatal(i, s.Turns, err)
+		}
+	}
+}
+
+func TestSQLiteMemoryDatabase(t *testing.T) {
+	c, err := LoadCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := OpenSQLite(context.Background(), ":memory:", c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	e := NewEngine(c, &fakeModel{decisions: []Decision{decision("SC33", Values{"city": "Almaty"})}}, p)
+	out, err := e.Process(context.Background(), input("one", "office"))
+	if err != nil || out.Status != "completed" {
+		t.Fatal(out, err)
+	}
+	s, err := p.Get(context.Background(), "call-1")
+	if err != nil || len(s.Turns) != 1 || p.Ready(context.Background()) != nil {
+		t.Fatal("in-memory database lost state", s, err)
 	}
 }

@@ -19,9 +19,9 @@ func main() {
 	if key == "" {
 		log.Fatal("Set OPENAI_API_KEY before starting the classifier")
 	}
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		log.Fatal("Set DATABASE_URL before starting the classifier")
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "voice_router.db"
 	}
 	apiToken, operatorToken := os.Getenv("API_TOKEN"), os.Getenv("OPERATOR_API_TOKEN")
 	if operatorToken != "" && operatorToken == apiToken {
@@ -41,13 +41,14 @@ func main() {
 	}
 	startup, cancelStartup := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelStartup()
-	repo, err := router.OpenPostgres(startup, databaseURL, catalog)
+	// Opening migrates idempotently, so a fresh checkout needs no separate step.
+	repo, err := router.OpenSQLite(startup, dbPath, catalog)
 	if err != nil {
-		log.Fatal("Cannot connect to PostgreSQL: ", err)
+		log.Fatal("Cannot open SQLite database: ", err)
 	}
 	defer repo.Close()
 	if err := repo.Ready(startup); err != nil {
-		log.Fatal("PostgreSQL is not ready; run go run ./cmd/migrate: ", err)
+		log.Fatal("SQLite store is not ready: ", err)
 	}
 	cancelStartup()
 	fastModel := os.Getenv("OPENAI_FAST_MODEL")
@@ -70,7 +71,7 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	log.Printf("Layer 2 classifier listening on %s; model=%s; fast=%s; fallback=%s; backend=synthetic; store=postgresql", addr, model, fastModel, engine.Policy.FallbackModel)
+	log.Printf("Layer 2 classifier listening on %s; model=%s; fast=%s; fallback=%s; backend=synthetic; store=sqlite; db=%s", addr, model, fastModel, engine.Policy.FallbackModel, dbPath)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

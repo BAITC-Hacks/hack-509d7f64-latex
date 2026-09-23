@@ -2,10 +2,36 @@ package router
 
 import "encoding/json"
 
+// dataMessage frames metadata, scenario details and review feedback as
+// untrusted user-role data, not system directives.
+func dataMessage(data any) (Values, error) {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	return Values{"role": "user", "content": string(encoded)}, nil
+}
+
+// fastRoutingMessages is the fast route's whole context: candidate details and
+// the utterance, without history or workflow state.
+func fastRoutingMessages(in Input, candidates Values) ([]any, error) {
+	messages := []any{}
+	for _, data := range []any{candidates, Values{"kind": "current_input", "input": in}} {
+		message, err := dataMessage(data)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	return messages, nil
+}
+
 // routingMessages rebuilds provider context from durable application state. It
 // deliberately sends no recursive supervisor trace, no full session snapshot,
-// and no pending copy of the current input from the turn table.
-func routingMessages(in Input, state Session) ([]any, error) {
+// and no pending copy of the current input from the turn table. Candidates,
+// which change every turn, go after history so that consecutive turns of a
+// session share the longest prompt prefix; nil omits them.
+func routingMessages(in Input, state Session, candidates Values) ([]any, error) {
 	completed := make([]Turn, 0, len(state.Turns))
 	for _, turn := range state.Turns {
 		if turn.Output == nil || (in.RequestID != "" && turn.Input.RequestID == in.RequestID) {
@@ -16,7 +42,7 @@ func routingMessages(in Input, state Session) ([]any, error) {
 	if len(completed) > 10 {
 		completed = completed[len(completed)-10:]
 	}
-	messages := make([]any, 0, 2*len(completed)+2+len(state.RoutingContext))
+	messages := make([]any, 0, 2*len(completed)+3+len(state.RoutingContext))
 	for _, turn := range completed {
 		messages = append(messages, Values{"role": "user", "content": turn.Input.Text})
 		if turn.Output.Answer != "" {
@@ -31,12 +57,11 @@ func routingMessages(in Input, state Session) ([]any, error) {
 		return out
 	}
 	appendData := func(data any) error {
-		encoded, err := json.Marshal(data)
+		message, err := dataMessage(data)
 		if err != nil {
 			return err
 		}
-		// Metadata and review feedback are untrusted data, not system directives.
-		messages = append(messages, Values{"role": "user", "content": string(encoded)})
+		messages = append(messages, message)
 		return nil
 	}
 	if err := appendData(Values{"kind": "workflow_context", "language": state.Language,
@@ -44,6 +69,11 @@ func routingMessages(in Input, state Session) ([]any, error) {
 		"suspended": frames(state.Stack), "queued": frames(state.Queue), "identity": state.Identity,
 		"low_confidence_turns": state.LowConfidence}); err != nil {
 		return nil, err
+	}
+	if candidates != nil {
+		if err := appendData(candidates); err != nil {
+			return nil, err
+		}
 	}
 	if err := appendData(Values{"kind": "current_input", "input": in}); err != nil {
 		return nil, err

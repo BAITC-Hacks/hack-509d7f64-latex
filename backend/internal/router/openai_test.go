@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -113,6 +114,9 @@ func TestOpenAIToolRoundTrip(t *testing.T) {
 		if routeTestPath(toolOutput, "type") != "function_call_output" || routeTestPath(toolOutput, "call_id") != "call-scenario-one" || !strings.Contains(str(routeTestPath(toolOutput, "output")), `"scenario_id":"SC33"`) {
 			t.Error("tool output did not match the original call_id and scenario")
 		}
+		if output := str(routeTestPath(toolOutput, "output")); !strings.Contains(output, `"city":{`) || strings.Contains(output, `"responses"`) {
+			t.Error("get_scenario should return the routing view with slot definitions")
+		}
 		if len(events) != 1 || events[0]["kind"] != "scenario_retrieved" {
 			t.Error("scenario result must be checkpointed before the next model request")
 		}
@@ -142,20 +146,20 @@ func TestRoutingContextChronologyAndCurrentInput(t *testing.T) {
 	state.Turns = append(state.Turns, Turn{Input: input("incomplete", "UNFINISHED_INPUT")})
 	// Pending review can have an output but is still the current request.
 	state.Turns = append(state.Turns, Turn{Input: in, Output: &Output{Answer: "CURRENT_PENDING_ANSWER"}})
-	messages, err := routingMessages(in, state)
+	messages, err := routingMessages(in, state, Values{"kind": "candidate_scenarios", "scenarios": []Values{{"scenario_id": "SC33"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 24 {
-		t.Fatalf("want 20 history messages + workflow + input + 2 events, got %d", len(messages))
+	if len(messages) != 25 {
+		t.Fatalf("want 20 history messages + workflow + candidates + input + 2 events, got %d", len(messages))
 	}
 	for i := 0; i < 10; i++ {
 		if routeTestPath(messages[i*2], "role") != "user" || routeTestPath(messages[i*2], "content") != fmt.Sprintf("history-%d", i+2) || routeTestPath(messages[i*2+1], "role") != "assistant" || routeTestPath(messages[i*2+1], "content") != fmt.Sprintf("answer-%d", i+2) {
 			t.Fatal("history order or role is incorrect", messages)
 		}
 	}
-	if !strings.Contains(str(routeTestPath(messages[20], "content")), "workflow_context") || !strings.Contains(str(routeTestPath(messages[21], "content")), "current_input") || !strings.Contains(str(routeTestPath(messages[22], "content")), "REJECTED_FEEDBACK") || !strings.Contains(str(routeTestPath(messages[23], "content")), "SC34") {
-		t.Fatal("workflow/input/events not in chronological order")
+	if !strings.Contains(str(routeTestPath(messages[20], "content")), "workflow_context") || !strings.Contains(str(routeTestPath(messages[21], "content")), "candidate_scenarios") || routeTestPath(messages[21], "role") != "user" || !strings.Contains(str(routeTestPath(messages[22], "content")), "current_input") || !strings.Contains(str(routeTestPath(messages[23], "content")), "REJECTED_FEEDBACK") || !strings.Contains(str(routeTestPath(messages[24], "content")), "SC34") {
+		t.Fatal("workflow/candidates/input/events not in chronological order")
 	}
 	encoded, _ := json.Marshal(messages)
 	if strings.Count(string(encoded), "CURRENT_UNIQUE_TEXT") != 1 || strings.Contains(string(encoded), "UNFINISHED_INPUT") || strings.Contains(string(encoded), "CURRENT_PENDING_ANSWER") {
@@ -173,8 +177,12 @@ func TestOpenAIPromptStableAcrossInputs(t *testing.T) {
 	}))
 	defer server.Close()
 	m := modelForServer(t, server)
-	for _, text := range []string{"FIRST_UNIQUE_TEXT", "SECOND_UNIQUE_TEXT"} {
-		if _, err := m.Route(context.Background(), input(text, text), Session{}, RouteOptions{}); err != nil {
+	for i, text := range []string{"FIRST_UNIQUE_TEXT", "SECOND_UNIQUE_TEXT"} {
+		opts := RouteOptions{}
+		if i == 1 {
+			opts.Candidates = []string{"SC33", "SC23"}
+		}
+		if _, err := m.Route(context.Background(), input(text, text), Session{}, opts); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -188,9 +196,192 @@ func TestOpenAIPromptStableAcrossInputs(t *testing.T) {
 	}
 }
 
+// routeData decodes a request's data messages by kind, plus every message
+// content joined, for substring checks.
+func routeData(body Values) (map[string]Values, string) {
+	data, contents := map[string]Values{}, []string{}
+	items, _ := body["input"].([]any)
+	for _, item := range items {
+		content := str(routeTestPath(item, "content"))
+		contents = append(contents, content)
+		var message Values
+		if json.Unmarshal([]byte(content), &message) == nil && message["kind"] != nil {
+			data[str(message["kind"])] = message
+		}
+	}
+	return data, strings.Join(contents, "\n")
+}
+
+func candidateIDs(data Values) []string {
+	ids := []string{}
+	for _, sc := range list(data["scenarios"]) {
+		ids = append(ids, str(asMap(sc)["scenario_id"]))
+	}
+	return ids
+}
+
+func TestOpenAIFullRouteDetailsOnlyCandidates(t *testing.T) {
+	var body Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		routeResponse(w)
+	}))
+	defer server.Close()
+	m := modelForServer(t, server)
+	m.FastModel = "fast-model"
+	state := Session{Language: "ru", Turns: []Turn{{Input: input("old", "EARLIER_TURN"), Output: &Output{Answer: "EARLIER_ANSWER"}}}}
+	if _, err := m.Route(context.Background(), input("one", "Астана офис"), state, RouteOptions{Candidates: []string{"SC33", "SYS_GOODBYE", "SC99", "SC17", "SC33"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, contents := routeData(body)
+	candidates := data["candidate_scenarios"]
+	if ids := candidateIDs(candidates); !reflect.DeepEqual(ids, []string{"SC17", "SC33"}) {
+		t.Fatal("candidate details should cover exactly the requested scenarios, in catalog order", ids)
+	}
+	slots := asMap(candidates["slots"])
+	for _, name := range []string{"city", "claim_number", "phone", "iin"} {
+		if routeTestPath(slots, name, "type") == nil || routeTestPath(slots, name, "prompt") != nil {
+			t.Fatal("candidate slot definitions incomplete or carry prompts", name, slots)
+		}
+	}
+	if slots["trip_country"] != nil || candidates["system_intents"] != nil {
+		t.Fatal("full route should define only candidate slots and index system intents statically")
+	}
+	items := body["input"].([]any)
+	if data["workflow_context"] == nil || !strings.Contains(contents, "EARLIER_TURN") || !strings.Contains(str(routeTestPath(items[len(items)-2], "content")), `"kind":"candidate_scenarios"`) || !strings.Contains(str(routeTestPath(items[len(items)-1], "content")), `"kind":"current_input"`) {
+		t.Fatal("candidates belong right before current_input, after history and workflow state")
+	}
+	if body["model"] != "test-model" || body["tools"] == nil || body["include"] == nil {
+		t.Fatal("full route keeps the main model and the get_scenario loop")
+	}
+	c := m.Catalog
+	if !strings.Contains(contents, c.Scenarios["SC33"].Examples["kk"][0]) || strings.Contains(contents, c.Scenarios["SC01"].Examples["ru"][0]) {
+		t.Fatal("examples should be sent for candidates only")
+	}
+	instructions := str(body["instructions"])
+	if !strings.Contains(instructions, "PROMPT_VERSION: voice-router.intent.v3") || strings.Contains(instructions, "SLOTS:") || strings.Contains(instructions, "not_this_if\":") {
+		t.Fatal("static prompt should be the compact v3 index", instructions)
+	}
+	for _, sc := range c.Ordered {
+		if !strings.Contains(instructions, "\n"+sc.ID+" [") {
+			t.Fatal("index misses", sc.ID)
+		}
+		for _, examples := range sc.Examples {
+			for _, example := range examples {
+				if strings.Contains(instructions, example) {
+					t.Fatal("static prompt must not carry examples", sc.ID, example)
+				}
+			}
+		}
+	}
+	for id := range c.System {
+		if !strings.Contains(instructions, "\n"+id+" [system] ") {
+			t.Fatal("index misses", id)
+		}
+	}
+}
+
+func TestOpenAIEmptyCandidatesDetailAllScenarios(t *testing.T) {
+	for _, candidates := range [][]string{nil, {"SYS_UNCLEAR", "SC99"}} {
+		var body Values
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			routeResponse(w)
+		}))
+		m := modelForServer(t, server)
+		if _, err := m.Route(context.Background(), input("one", "text"), Session{}, RouteOptions{Candidates: candidates}); err != nil {
+			t.Fatal(err)
+		}
+		server.Close()
+		data, _ := routeData(body)
+		want := []string{}
+		used := map[string]bool{}
+		for _, sc := range m.Catalog.Ordered {
+			want = append(want, sc.ID)
+			for _, name := range append(slices.Clone(sc.Slots.Required), sc.Slots.Optional...) {
+				used[name] = true
+			}
+		}
+		slots := asMap(data["candidate_scenarios"]["slots"])
+		if !reflect.DeepEqual(candidateIDs(data["candidate_scenarios"]), want) {
+			t.Fatal("no usable candidates should detail every scenario", candidates)
+		}
+		for name := range used {
+			if slots[name] == nil {
+				t.Fatal("missing slot definition", name)
+			}
+		}
+	}
+}
+
+func TestOpenAIFastRoute(t *testing.T) {
+	var calls atomic.Int32
+	var body Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		routeResponse(w)
+	}))
+	defer server.Close()
+	m := modelForServer(t, server)
+	m.FastModel = "fast-model"
+	var events []string
+	ctx := withRouteRecorder(context.Background(), func(kind string, _ Values) error {
+		events = append(events, kind)
+		return nil
+	})
+	state := Session{Language: "ru", Active: &Frame{ScenarioID: "SC17", Slots: Values{"claim_number": "ACTIVE_SLOT"}}, Turns: []Turn{{Input: input("old", "EARLIER_TURN"), Output: &Output{Answer: "EARLIER_ANSWER"}}}, RoutingContext: []Values{{"kind": "review_feedback", "feedback": "OLD_FEEDBACK"}}}
+	d, err := m.Route(ctx, input("one", "Астана офис"), state, RouteOptions{Candidates: []string{"SC33", "SC23", "SC99"}, Fast: true})
+	if err != nil || d.Scenarios[0].ScenarioID != "SC33" || d.Slots["city"] != "Astana" || calls.Load() != 1 || !reflect.DeepEqual(events, []string{"model_proposal"}) {
+		t.Fatal(d, err, calls.Load(), events)
+	}
+	if body["model"] != "fast-model" || body["tools"] != nil || body["include"] != nil || body["parallel_tool_calls"] != nil || body["store"] != false || routeTestPath(body, "text", "format", "strict") != true {
+		t.Fatal("fast route is one stateless strict request on the fast model without tools", body)
+	}
+	instructions := str(body["instructions"])
+	if !strings.Contains(instructions, "PROMPT_VERSION: voice-router.fast.v1") || strings.Contains(instructions, "SCENARIO_INDEX") || instructions == m.routeInstructions {
+		t.Fatal("fast route needs its own short instructions")
+	}
+	schema := routeTestPath(body, "text", "format", "schema", "properties")
+	want := []any{"SC23", "SC33", "SYS_GOODBYE", "SYS_OUT_OF_SCOPE", "SYS_UNCLEAR"}
+	for _, field := range []string{"scenarios", "alternatives"} {
+		if got := routeTestPath(schema, field, "items", "properties", "scenario_id", "enum"); !reflect.DeepEqual(got, want) {
+			t.Fatal("fast enum should be candidates plus system intents", field, got)
+		}
+	}
+	if routeTestPath(schema, "slots", "items", "properties", "name", "enum") == nil || routeTestPath(schema, "scenarios", "minItems") != float64(1) {
+		t.Fatal("slot names should be restricted to the catalog and a primary scenario required")
+	}
+	data, contents := routeData(body)
+	if len(body["input"].([]any)) != 2 || !reflect.DeepEqual(candidateIDs(data["candidate_scenarios"]), []string{"SC23", "SC33"}) || len(list(data["candidate_scenarios"]["system_intents"])) != 3 || data["current_input"] == nil {
+		t.Fatal("fast input is candidate details with system intents, then current_input", contents)
+	}
+	for _, leaked := range []string{"EARLIER_TURN", "EARLIER_ANSWER", "OLD_FEEDBACK", "ACTIVE_SLOT", "workflow_context"} {
+		if strings.Contains(contents, leaked) {
+			t.Fatal("fast route must not send dialog state", leaked)
+		}
+	}
+	if _, err := m.Route(ctx, input("two", "text"), Session{}, RouteOptions{Candidates: []string{"SC33"}, Fast: true, Model: "fallback-model"}); err != nil || body["model"] != "fallback-model" {
+		t.Fatal("explicit model overrides the fast model", err, body["model"])
+	}
+}
+
+func TestOpenAIFastRouteRejectsToolCalls(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		writeJSON(w, 200, Values{"status": "completed", "output": []any{Values{"type": "function_call", "call_id": "call-one", "name": "get_scenario", "arguments": `{"scenario_id":"SC33"}`}}})
+	}))
+	defer server.Close()
+	_, err := modelForServer(t, server).Route(context.Background(), input("one", "text"), Session{}, RouteOptions{Candidates: []string{"SC33"}, Fast: true})
+	if err == nil || !strings.Contains(err.Error(), "unexpected tool call") || calls.Load() != 1 {
+		t.Fatal(err, calls.Load())
+	}
+}
+
 func TestRoutingContextOmitsProviderInternals(t *testing.T) {
 	event := Values{"kind": "scenario_retrieved", "data": Values{"result": Values{"scenario_id": "SC33"}, "provider_output": []any{Values{"encrypted_content": "OPAQUE_INTERNAL"}}, "tool_output": Values{"output": "DUPLICATE_RESULT"}}}
-	messages, err := routingMessages(input("one", "text"), Session{RoutingContext: []Values{event}})
+	messages, err := routingMessages(input("one", "text"), Session{RoutingContext: []Values{event}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

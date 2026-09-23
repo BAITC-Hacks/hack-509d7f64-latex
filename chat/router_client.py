@@ -4,7 +4,8 @@ The transcript of each user turn goes to the Go router in `backend/` (layer 2), 
 runs the (synthetic) business actions and writes the reply. Its contract (see backend/README.md):
 
     POST ROUTER_URL                      # default http://127.0.0.1:8080/v1/turns
-    {"session_id": "chat_ab12...", "request_id": "chat_ab12...-t3", "text": "<transcript>", "language": "ru|kk|mixed"}
+    {"session_id": "chat_ab12...", "request_id": "chat_ab12...-t3", "text": "<transcript>", "language": "ru|kk|mixed",
+     "reply_language": "ru|kk"}          # reply_language only when the chat decided it (see reply_lang.py)
     -> {"answer": "...", "language": "ru|kk", "status": "completed|awaiting_slot|awaiting_confirmation|clarification|cancelled|handoff",
         "active_scenario": "SC12", "pending_scenarios": [...],
         "trace": {"decision": {"scenarios": [{"scenario_id", "confidence", "reason"}], "alternatives": [...], "slots": {...}},
@@ -64,9 +65,9 @@ class MockRouter:
             self.system = {s["id"]: s for s in data.get("system_intents", [])}
             self.names.update({k: v.get("name") or k for k, v in self.system.items()})
 
-    def turn(self, text: str, lang: str) -> dict:
+    def turn(self, text: str, lang: str, reply_lang: str | None = None) -> dict:
         t0 = time.perf_counter()
-        reply_lang = "kk" if lang == "kk" else "ru"
+        reply_lang = reply_lang or ("kk" if lang == "kk" else "ru")
         toks = _tokens(text)
         scored = sorted(((len(toks & sc["_bag"]), sc) for sc in self.scenarios), key=lambda x: -x[0])
         top = [(n, sc) for n, sc in scored[:3] if n > 0]
@@ -185,13 +186,17 @@ class Router:
             "error": trace.get("error"),
         }
 
-    def turn(self, session_id: str, remote_session: str | None, text: str, lang: str, turn: int) -> dict:
+    def turn(self, session_id: str, remote_session: str | None, text: str, lang: str, turn: int,
+             reply_lang: str | None = None) -> dict:
         if self.mode != "mock" and self.url:
             t0 = time.perf_counter()
             sid = remote_session or session_id
             try:
-                data = self._post(self.url, {"session_id": sid, "request_id": f"{sid}-t{turn}", "text": text,
-                                             "language": lang if lang in ("ru", "kk", "mixed") else detect_lang(text)})
+                payload = {"session_id": sid, "request_id": f"{sid}-t{turn}", "text": text,
+                           "language": lang if lang in ("ru", "kk", "mixed") else detect_lang(text)}
+                if reply_lang:
+                    payload["reply_language"] = reply_lang
+                data = self._post(self.url, payload)
                 reply = next((data[k] for k in REPLY_KEYS if isinstance(data.get(k), str) and data[k].strip()), None)
                 if reply is None:
                     raise ValueError(f"no reply text in response keys {sorted(data)[:8]}")
@@ -207,8 +212,8 @@ class Router:
                 self.last_error = str(e)
                 if self.mode == "remote":
                     raise RuntimeError(f"router unreachable at {self.url}: {e}")
-            fallback = self.mock.turn(text, lang)
+            fallback = self.mock.turn(text, lang, reply_lang)
             fallback["source"] = "mock"
             fallback["trace"]["reason"] += f" (remote router failed: {self.last_error})"
             return fallback
-        return self.mock.turn(text, lang)
+        return self.mock.turn(text, lang, reply_lang)

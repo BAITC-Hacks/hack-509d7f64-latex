@@ -1,7 +1,7 @@
-# Voice Samurai — chat frontend + gateway
+# Neonic Samurais — chat frontend + gateway
 
-Browser chat with the agent by voice or text, in Kazakh, Russian, or both, in the style of
-sumi ink on washi paper with vermilion seals. Runs on <http://localhost:9102>.
+Browser chat with the agent by voice or text, in Kazakh, Russian, or both, styled as a neon night city
+(magenta/cyan glow, glass panels, scanlines). Runs on <http://localhost:9102>.
 
 ```
 mic (16 kHz PCM) ──ws──▶ gateway ──▶ STT service ──▶ live partial text every 0.7 s
@@ -9,10 +9,15 @@ mic (16 kHz PCM) ──ws──▶ gateway ──▶ STT service ──▶ live 
                                   ──▶ TTS service ──▶ reply audio ──ws──▶ browser plays it
 ```
 
-- **Hold the seal** (or `Space`) to talk, release to send. Partial transcription appears while
+- **Hold the ring** (or `Space`) to talk, release to send. Partial transcription appears while
   you speak. **Hands-free** mode: tap once, it stops after a 1.2 s pause and listens again after
   each reply. The text box sends typed turns through the same router and voice path.
-- **巻 trace** opens the folding-screen panel: language, scenarios with confidence, reason,
+- **Answer in: Auto · Русский · Қазақша** picks the reply language (text and voice). **Auto** (default)
+  answers in the language the user has spoken most in the current conversation: Russian and Kazakh turns
+  are counted per session, mixed turns count for neither, a tie goes to the latest non-mixed turn, and with
+  only mixed turns so far the router decides. The choice is remembered in the browser; the trace shows
+  whether a reply language was `chosen`, `auto`, or left to the `router`.
+- **⌁ trace** opens the HUD panel: language, scenarios with confidence, reason,
   per-stage latency (stt / router / tts / total), and which TTS engine spoke each sentence.
 - Status crests: STT, TTS, ROUTER (`go` when the Go service answers, `mock` otherwise), LINK.
 
@@ -22,7 +27,8 @@ The gateway posts each user turn to the layer-2 router in `backend/` (`ROUTER_UR
 `http://127.0.0.1:8080/v1/turns`, `http://router:8080/v1/turns` in Docker) and reads the reply back:
 
 ```
-POST $ROUTER_URL   {"session_id": "chat_ab12…", "request_id": "chat_ab12…-t3", "text": "<transcript>", "language": "ru|kk|mixed"}
+POST $ROUTER_URL   {"session_id": "chat_ab12…", "request_id": "chat_ab12…-t3", "text": "<transcript>", "language": "ru|kk|mixed",
+                   "reply_language": "ru|kk"}   # only when chosen or decided by Auto (reply_lang.py)
 → 200 {"answer": "…", "language": "ru|kk", "status": "completed|awaiting_slot|awaiting_confirmation|clarification|cancelled|handoff",
        "active_scenario", "pending_scenarios", "trace": {"decision": {"scenarios", "alternatives", "slots"}, "actions", "latency_ms", "error"}}
 ```
@@ -42,8 +48,8 @@ over `scenarios.json` (replies are badged **mock router**). `remote` never falls
 |---|---|---|
 | `GET` | `/health` | STT / TTS reachability, router mode and reachability |
 | `POST` | `/api/session` | `{"session_id"}` (the Go router creates its session implicitly on the first turn) |
-| `WS` | `/ws?session_id=` | binary PCM16 16 kHz frames + JSON `start` / `end` / `cancel` / `text`; events `partial`, `final`, `reply`, `audio`, `turn_done`, `notice`, `error` |
-| `POST` | `/api/turn` | `{"session_id","text"}` → reply, trace, latency, audio URL (no WebSocket needed) |
+| `WS` | `/ws?session_id=` | binary PCM16 16 kHz frames + JSON `start` / `end` / `cancel` / `text` (`start` and `text` carry `reply_language`: `auto`/`ru`/`kk`); events `partial`, `final`, `reply`, `audio`, `turn_done`, `notice`, `error` |
+| `POST` | `/api/turn` | `{"session_id","text","reply_language"?}` → reply, trace, latency, audio URL (no WebSocket needed) |
 | `GET` | `/api/session/{id}/history` | all turns of a session |
 | `GET` | `/audio/{id}.wav` | synthesized reply audio (kept in memory, last 60) |
 
@@ -51,5 +57,5 @@ Environment: `CHAT_PORT` (9102), `STT_URL`, `TTS_URL`, `ROUTER_URL`, `ROUTER_TOK
 `ROUTER_MODE`, `DATASET_DIR` (`../voice_router_dataset`, for the mock and scenario names), `TTS_LANG` (`auto`),
 `TTS_VOICE_RU`, `TTS_VOICE_KK`.
 
-Mic access needs `localhost` or HTTPS. Files: `server.py` (gateway), `router_client.py`
-(Go adapter + mock), `static/` (`index.html`, `style.css`, `app.js`, `worklet.js`).
+Mic access needs `localhost` or HTTPS. Files: `server.py` (gateway), `reply_lang.py` (answer-language
+choice), `router_client.py` (Go adapter + mock), `tests/` (`pytest chat/tests`), `static/` (`index.html`, `style.css`, `app.js`, `worklet.js`).

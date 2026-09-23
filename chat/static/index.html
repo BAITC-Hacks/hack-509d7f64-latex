@@ -3,19 +3,23 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Voice Samurai</title>
+<meta name="color-scheme" content="dark">
+<title>Neonic Samurais</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&family=Noto+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Exo+2:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<div class="seigaiha" aria-hidden="true"></div>
+<div class="city" aria-hidden="true"><div class="sun"></div><div class="grid"></div></div>
+<div class="scanlines" aria-hidden="true"></div>
 
 <header class="top">
   <div class="brand">
-    <span class="kanji" aria-hidden="true">声</span>
+    <span class="logo" aria-hidden="true"><span class="blade"></span><span class="kanji">侍</span></span>
     <div>
-      <h1>Voice Samurai <span class="sub">声の侍 · Saqta Insurance</span></h1>
+      <h1><span class="neon-m">NEONIC</span> <span class="neon-c">SAMURAIS</span></h1>
+      <div class="sub">voice agent · Saqta Insurance · қазақша / русский</div>
       <div class="crests">
         <span class="crest" id="crestStt" title="speech-to-text service">STT</span>
         <span class="crest" id="crestTts" title="text-to-speech service">TTS</span>
@@ -25,12 +29,22 @@
     </div>
   </div>
   <div class="controls">
-    <label class="toggle"><input type="checkbox" id="handsFree"> hands-free</label>
-    <label class="toggle"><input type="checkbox" id="autoplay" checked> voice replies</label>
-    <button class="ghost" id="traceBtn" title="show the routing trace">巻 trace</button>
+    <div class="langpick" role="radiogroup" aria-label="answer language">
+      <span class="lp-label">answer in</span>
+      <div class="seg">
+        <label><input type="radio" name="replyLang" value="auto" checked><span>Auto</span></label>
+        <label><input type="radio" name="replyLang" value="ru"><span>Русский</span></label>
+        <label><input type="radio" name="replyLang" value="kk"><span>Қазақша</span></label>
+      </div>
+      <span class="lp-note" id="langNote" title="Auto answers in the language you have used most in this conversation">follows your most-used language</span>
+    </div>
+    <div class="switches">
+      <label class="toggle"><input type="checkbox" id="handsFree"><span>hands-free</span></label>
+      <label class="toggle"><input type="checkbox" id="autoplay" checked><span>voice replies</span></label>
+      <button class="ghost" id="traceBtn" title="show the routing trace">⌁ trace</button>
+    </div>
   </div>
 </header>
-<svg class="brush" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 C 120 4, 260 22, 400 12 S 700 2, 860 14 S 1100 20, 1200 10 L1200 24 L0 24 Z" fill="currentColor"/></svg>
 
 <main class="layout">
   <section class="scroll" id="chat" aria-live="polite">
@@ -38,13 +52,13 @@
       <div class="seal" aria-hidden="true">侍</div>
       <div class="paper">
         <p>Сәлеметсіз бе! Здравствуйте. Говорите по-казахски или по-русски: я расшифрую вашу речь, отправлю запрос агенту и отвечу голосом.</p>
-        <span class="meta">Hold the seal to talk, or type below.</span>
+        <span class="meta">Hold the ring to talk, or type below. Pick the answer language at the top.</span>
       </div>
     </div>
   </section>
 
   <aside class="byobu" id="trace" hidden>
-    <h2>巻物 · Trace</h2>
+    <h2><span class="neon-c">//</span> TRACE</h2>
     <div id="traceBody" class="tracebody"><p class="dim">No turns yet.</p></div>
   </aside>
 </main>
@@ -53,20 +67,21 @@
   <div class="live" id="live" hidden>
     <span class="dot"></span>
     <span class="livetext" id="liveText">…</span>
-    <span class="blade"><i id="level"></i></span>
+    <span class="meter"><i id="level"></i></span>
     <span class="timer" id="timer">0.0 s</span>
   </div>
   <div class="bar">
     <button class="hanko" id="mic" aria-label="hold to talk">
       <span class="ring"></span>
+      <span class="sweep"></span>
       <span class="glyph">声</span>
     </button>
     <form class="typebox" id="form" autocomplete="off">
-      <input id="text" placeholder="…or write your request (Kazakh / Russian)" maxlength="2000">
-      <button type="submit" class="send" aria-label="send">送</button>
+      <input id="text" placeholder="…or type your request (қазақша / русский)" maxlength="2000">
+      <button type="submit" class="send" aria-label="send">➤</button>
     </form>
   </div>
-  <div class="hint" id="hint">Hold the seal (or Space) and speak. Release to send.</div>
+  <div class="hint" id="hint">Hold the ring (or Space) and speak. Release to send.</div>
 </footer>
 
 <script src="/static/app.js"></script>

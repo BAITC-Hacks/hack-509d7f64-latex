@@ -24,7 +24,7 @@ Classfier -> PostgreSQL-backed state -> scenario tools -> tools (Sanzhar)
 | `backend/` | **Layer 2**: Go LLM router (OpenAI Responses API + Structured Outputs), synthetic backend, PostgreSQL-backed sessions | 8080 |
 | `stt/` | **Layer 1 input**: wav2vec2-CTC Kazakh/Russian STT (`alibiserikbay/kazakh-russian-mixed-stt`) + browser test console | 9100 |
 | `tts/` | **Layer 3 output**: Silero v5 (Russian) + ISSAI KazakhTTS (Kazakh), routed per sentence | 9101 |
-| `chat/` | **Voice Samurai** frontend + gateway: mic → STT → router → TTS, trace panel | 9102 |
+| `chat/` | **Neonic Samurais** frontend + gateway: mic → STT → router → TTS, answer-language picker, trace panel | 9102 |
 | `docker/`, `docker-compose.yml` | the four services as containers (`docker-compose.gpu.yml` = NVIDIA overlay) | |
 | `scripts/` | `speech_services.sh` start/stop/status for the Python services, `docker_seed_models.sh` for offline weights | |
 | `voice_router_dataset/` | the case dataset: embedded into the Go binary, read by the chat mock and the STT console | |

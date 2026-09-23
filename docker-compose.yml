@@ -1,4 +1,4 @@
-# Voice Router stack: Go router (layer 2) + STT (input) + TTS (output) + Voice Samurai chat frontend/gateway.
+# Voice Router stack: Go router (layer 2) + STT (input) + TTS (output) + Neonic Samurais chat frontend/gateway.
 #   cp .env.example .env && edit OPENAI_API_KEY   # the router exits without a key; the chat then falls back to its keyword mock
 #   docker compose up --build -d                  # CPU images; first start downloads ~1 GB of speech weights into the "speech-models" volume
 #   scripts/docker_seed_models.sh                 # optional: copy weights already in stt/models + tts/models into that volume (offline start)

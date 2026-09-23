@@ -8,9 +8,10 @@ Text turns skip STT. Everything the browser needs is same-origin here; STT/TTS r
 
 WebSocket /ws?session_id=...
   client -> server : binary frames = PCM16 mono 16 kHz
-                     {"type":"start"} {"type":"end"} {"type":"cancel"} {"type":"text","text":"..."} {"type":"ping"}
+                     {"type":"start","reply_language"} {"type":"end"} {"type":"cancel"} {"type":"text","text","reply_language"} {"type":"ping"}
+                     reply_language = "auto" | "ru" | "kk"  (auto: the language the user spoke most in this conversation)
   server -> client : {"type":"ready"} {"type":"partial","text"} {"type":"final","text","lang","stt_ms"}
-                     {"type":"reply","text","lang","source","router_ms","trace"} {"type":"audio","url","duration_s","tts_ms","segments"}
+                     {"type":"reply","text","lang","lang_mode","lang_counts","source","router_ms","trace"} {"type":"audio","url","duration_s","tts_ms","segments"}
                      {"type":"turn_done","turn","latency_ms"} {"type":"notice","message"} {"type":"error","message"}
 """
 from __future__ import annotations
@@ -40,6 +41,7 @@ from starlette.concurrency import run_in_threadpool
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+from reply_lang import choose_reply_lang, new_tally, normalize_pref, observe  # noqa: E402
 from router_client import Router, detect_lang  # noqa: E402
 
 STT_URL = os.environ.get("STT_URL", "http://127.0.0.1:9100").rstrip("/")
@@ -118,7 +120,8 @@ def store_audio(wav: bytes) -> str:
 
 
 # --------------------------------------------------------------------------- turn pipeline
-async def run_turn(ws: WebSocket | None, session: dict, text: str, lang: str, stt_ms: int | None) -> dict:
+async def run_turn(ws: WebSocket | None, session: dict, text: str, lang: str, stt_ms: int | None,
+                   lang_pref: str = "auto") -> dict:
     """Router -> TTS; streams intermediate events to ws when given. Returns the full turn record."""
     async def emit(msg: dict):
         if ws is not None:
@@ -126,15 +129,19 @@ async def run_turn(ws: WebSocket | None, session: dict, text: str, lang: str, st
 
     session["turn"] += 1
     turn_no = session["turn"]
+    observe(session["langs"], lang)
+    wanted, lang_mode = choose_reply_lang(session["langs"], lang_pref)
+    lang_counts = dict(session["langs"]["counts"])
     t0 = time.perf_counter()
     await emit({"type": "thinking"})
     try:
-        r = await run_in_threadpool(router.turn, session["id"], session.get("remote_session"), text, lang, turn_no)
+        r = await run_in_threadpool(router.turn, session["id"], session.get("remote_session"), text, lang, turn_no, wanted)
     except Exception as e:
         await emit({"type": "error", "message": f"router: {e}"})
         return {"error": str(e)}
-    reply_lang = r.get("lang") or detect_lang(r["reply"])
-    await emit({"type": "reply", "text": r["reply"], "lang": reply_lang, "source": r["source"],
+    reply_lang = r.get("lang") or wanted or detect_lang(r["reply"])
+    await emit({"type": "reply", "text": r["reply"], "lang": reply_lang, "lang_mode": lang_mode, "lang_counts": lang_counts,
+                "source": r["source"],
                 "router_ms": r["ms"], "trace": r.get("trace", {})})
 
     audio_info = None
@@ -152,7 +159,7 @@ async def run_turn(ws: WebSocket | None, session: dict, text: str, lang: str, st
 
     latency = {"stt": stt_ms, "router": r["ms"], "tts": tts_ms, "total": round((time.perf_counter() - t0) * 1000) + (stt_ms or 0)}
     record = {"turn": turn_no, "user": text, "lang": lang, "reply": r["reply"], "reply_lang": reply_lang,
-              "source": r["source"], "trace": r.get("trace", {}), "audio": audio_info, "latency_ms": latency}
+              "reply_lang_mode": lang_mode, "lang_counts": lang_counts, "source": r["source"], "trace": r.get("trace", {}), "audio": audio_info, "latency_ms": latency}
     session["history"].append(record)
     await emit({"type": "turn_done", "turn": turn_no, "latency_ms": latency})
     return record
@@ -186,7 +193,8 @@ async def health():
 async def new_session():
     sid = "chat_" + uuid.uuid4().hex[:12]
     remote = await run_in_threadpool(router.new_session)
-    SESSIONS[sid] = {"id": sid, "remote_session": remote, "turn": 0, "history": [], "created": time.time()}
+    SESSIONS[sid] = {"id": sid, "remote_session": remote, "turn": 0, "history": [], "langs": new_tally(),
+                     "created": time.time()}
     if len(SESSIONS) > 500:
         oldest = min(SESSIONS, key=lambda k: SESSIONS[k]["created"])
         SESSIONS.pop(oldest, None)
@@ -196,6 +204,7 @@ async def new_session():
 class TurnRequest(BaseModel):
     session_id: str
     text: str
+    reply_language: str = "auto"  # "auto" | "ru" | "kk"
 
 
 @app.post("/api/turn")
@@ -206,7 +215,7 @@ async def rest_turn(req: TurnRequest):
         raise HTTPException(404, "unknown session; POST /api/session first")
     if not req.text.strip():
         raise HTTPException(400, "empty text")
-    record = await run_turn(None, session, req.text.strip(), detect_lang(req.text), None)
+    record = await run_turn(None, session, req.text.strip(), detect_lang(req.text), None, normalize_pref(req.reply_language))
     if "error" in record:
         raise HTTPException(502, record["error"])
     return record
@@ -244,6 +253,7 @@ async def ws_endpoint(ws: WebSocket):
     last_partial_len = 0
     partial_task: asyncio.Task | None = None
     busy = asyncio.Lock()
+    lang_pref = "auto"  # the picker value sent with the current utterance / text turn
 
     async def partial_loop():
         nonlocal last_partial_len
@@ -290,7 +300,7 @@ async def ws_endpoint(ws: WebSocket):
             await ws.send_json({"type": "notice", "message": "no speech recognized"})
             return
         async with busy:
-            await run_turn(ws, session, text, lang, stt_ms)
+            await run_turn(ws, session, text, lang, stt_ms, lang_pref)
 
     try:
         while True:
@@ -307,6 +317,7 @@ async def ws_endpoint(ws: WebSocket):
                 continue
             kind = ev.get("type")
             if kind == "start":
+                lang_pref = normalize_pref(ev.get("reply_language"))
                 pcm.clear()
                 last_partial_len = 0
                 recording = True
@@ -327,8 +338,9 @@ async def ws_endpoint(ws: WebSocket):
             elif kind == "text":
                 text = (ev.get("text") or "").strip()
                 if text:
+                    lang_pref = normalize_pref(ev.get("reply_language"))
                     async with busy:
-                        await run_turn(ws, session, text, detect_lang(text), None)
+                        await run_turn(ws, session, text, detect_lang(text), None, lang_pref)
             elif kind == "ping":
                 await ws.send_json({"type": "pong", "t": ev.get("t")})
     except WebSocketDisconnect:

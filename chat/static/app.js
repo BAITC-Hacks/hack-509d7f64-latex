@@ -1,5 +1,5 @@
 'use strict';
-// Voice Samurai — chat client: mic PCM over WebSocket, live partial transcript, reply text + voice, trace panel.
+// Neonic Samurais — chat client: mic PCM over WebSocket, live partial transcript, reply text + voice, trace panel.
 
 const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -10,6 +10,22 @@ const S = { sid: null, ws: null, wsRetry: null, recording: false, busy: false, c
             t0: 0, timer: null, speechMs: 0, silenceSince: null, lastTick: 0, pending: null, lastBot: null, turn: null, ready: false };
 const chat = $('#chat'), live = $('#live'), liveText = $('#liveText'), level = $('#level'), timer = $('#timer');
 const mic = $('#mic'), hint = $('#hint'), handsFree = $('#handsFree'), autoplay = $('#autoplay');
+
+// ---------------------------------------------------------------- answer language (auto = most used in this conversation)
+const LANG_NAMES = { ru: 'Русский', kk: 'Қазақша' };
+const langPref = () => ($('input[name="replyLang"]:checked') || {}).value || 'auto';
+function langNote(m) {
+  const note = $('#langNote'), pref = langPref();
+  if (pref !== 'auto') { note.innerHTML = `always <b>${LANG_NAMES[pref]}</b>`; return; }
+  const c = m && m.lang_counts;
+  if (!c) { note.textContent = 'follows your most-used language'; return; }
+  const lead = c.kk > c.ru ? 'kk' : c.ru > c.kk ? 'ru' : null;  // tie: the server uses the latest non-mixed turn
+  note.innerHTML = `→ <b>${lead ? LANG_NAMES[lead] : 'latest turn'}</b> <span class="dim">(${c.kk} kk / ${c.ru} ru)</span>`;
+}
+document.querySelectorAll('input[name="replyLang"]').forEach((r) => {
+  r.checked = r.value === store.get('replyLang', 'auto');
+  r.onchange = () => { store.set('replyLang', langPref()); langNote(S.turn && S.turn.reply); };
+});
 
 // ---------------------------------------------------------------- status crests
 function crest(id, cls, text) { const el = $(id); el.className = 'crest ' + cls; if (text) el.textContent = text; }
@@ -88,8 +104,11 @@ function handle(m) {
     case 'reply': {
       const el = S.pending || addBotPending();
       const src = m.source === 'mock' ? '<b>mock router</b>' : 'go router';
-      fillBot(el, m.text, `${src} · ${m.router_ms} ms · lang <b>${esc(m.lang)}</b>`);
+      const mode = { chosen: 'chosen', auto: 'auto · most used', router: 'router' }[m.lang_mode] || '';
+      fillBot(el, m.text, `${src} · ${m.router_ms} ms · lang <b>${esc(m.lang)}</b>${mode ? ` <span class="lm">${mode}</span>` : ''}`);
+      S.pending = null;  // answered: a later notice (e.g. TTS down) must not remove this bubble
       S.turn = { reply: m, audio: null, latency: null };
+      langNote(m);
       renderTrace();
       break;
     }
@@ -128,6 +147,7 @@ function renderTrace() {
   const rows = [
     ['turn', `${t.n ?? '…'} · ${t.reply.source === 'mock' ? 'mock router' : 'go router'}`],
     ['language', esc(tr.language || t.reply.lang || '—')],
+    ['reply lang', `${esc(t.reply.lang || '—')} · ${esc(t.reply.lang_mode || '—')}${t.reply.lang_counts ? ` <span class="dim">(kk ${t.reply.lang_counts.kk} / ru ${t.reply.lang_counts.ru})</span>` : ''}`],
     ['scenarios', tags(tr.scenarios, true)],
     ['alternatives', tags(tr.alternatives, false)],
     ['reason', esc(tr.reason || '—')],
@@ -179,10 +199,10 @@ async function startRecording() {
   if (S.recording || S.busy || !S.ready) return;
   try { await ensureMic(); } catch (e) { notice('microphone unavailable: ' + e.message + ' (needs localhost or HTTPS)', true); return; }
   S.recording = true; S.t0 = S.lastTick = performance.now(); S.speechMs = 0; S.silenceSince = null;
-  send({ type: 'start' });
+  send({ type: 'start', reply_language: langPref() });
   mic.classList.add('rec'); live.hidden = false; liveText.textContent = '…'; liveText.classList.add('empty'); level.style.width = '0';
   S.timer = setInterval(() => { timer.textContent = ((performance.now() - S.t0) / 1000).toFixed(1) + ' s'; }, 100);
-  hint.textContent = handsFree.checked ? 'Listening… stops by itself after a pause, or tap the seal.' : 'Listening… release to send.';
+  hint.textContent = handsFree.checked ? 'Listening… stops by itself after a pause, or tap the ring.' : 'Listening… release to send.';
 }
 function stopRecording(cancel = false) {
   if (!S.recording) return;
@@ -190,7 +210,7 @@ function stopRecording(cancel = false) {
   clearInterval(S.timer); mic.classList.remove('rec'); level.style.width = '0';
   send({ type: cancel ? 'cancel' : 'end' });
   if (cancel) live.hidden = true; else { liveText.textContent = liveText.textContent === '…' ? 'recognizing…' : liveText.textContent; }
-  hint.textContent = handsFree.checked ? 'Hands-free: tap the seal to start; it stops after a pause and resumes after each reply.' : 'Hold the seal (or Space) and speak. Release to send.';
+  hint.textContent = handsFree.checked ? 'Hands-free: tap the ring to start; it stops after a pause and resumes after each reply.' : 'Hold the ring (or Space) and speak. Release to send.';
 }
 let pressAt = 0;
 mic.addEventListener('pointerdown', (e) => { e.preventDefault(); mic.setPointerCapture(e.pointerId); pressAt = performance.now();
@@ -200,7 +220,7 @@ mic.addEventListener('pointercancel', () => { if (!handsFree.checked) stopRecord
 document.addEventListener('keydown', (e) => { if (e.code === 'Space' && !e.repeat && !/INPUT|TEXTAREA/.test(e.target.tagName)) { e.preventDefault(); startRecording(); } });
 document.addEventListener('keyup', (e) => { if (e.code === 'Space' && !/INPUT|TEXTAREA/.test(e.target.tagName) && !handsFree.checked) stopRecording(); });
 handsFree.checked = store.get('handsFree', false); autoplay.checked = store.get('autoplay', true);
-handsFree.onchange = () => { store.set('handsFree', handsFree.checked); stopRecording(true); hint.textContent = handsFree.checked ? 'Hands-free: tap the seal to start; it stops after a pause and resumes after each reply.' : 'Hold the seal (or Space) and speak. Release to send.'; };
+handsFree.onchange = () => { store.set('handsFree', handsFree.checked); stopRecording(true); hint.textContent = handsFree.checked ? 'Hands-free: tap the ring to start; it stops after a pause and resumes after each reply.' : 'Hold the ring (or Space) and speak. Release to send.'; };
 autoplay.onchange = () => store.set('autoplay', autoplay.checked);
 
 // ---------------------------------------------------------------- typed turns
@@ -210,7 +230,7 @@ $('#form').onsubmit = (e) => {
   if (!text || S.busy || !S.ready) return;
   $('#text').value = '';
   addUser(text, '✎ typed');
-  send({ type: 'text', text });
+  send({ type: 'text', text, reply_language: langPref() });
 };
 
 // ---------------------------------------------------------------- init

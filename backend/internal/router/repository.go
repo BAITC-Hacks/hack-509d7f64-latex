@@ -6,7 +6,6 @@ import (
 )
 
 var (
- ErrConflict = errors.New("request conflicts with persisted state")
  ErrBusy = errors.New("session is already processing a turn")
  ErrNotFound = errors.New("record not found")
  ErrDatabase = errors.New("database unavailable")

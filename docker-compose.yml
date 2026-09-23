@@ -1,0 +1,73 @@
+# Voice Router stack: Go router (layer 2) + STT (input) + TTS (output) + Voice Samurai chat frontend/gateway.
+#   cp .env.example .env && edit OPENAI_API_KEY   # the router exits without a key; the chat then falls back to its keyword mock
+#   docker compose up --build -d                  # CPU images; first start downloads ~1 GB of speech weights into the "speech-models" volume
+#   scripts/docker_seed_models.sh                 # optional: copy weights already in stt/models + tts/models into that volume (offline start)
+#   open http://localhost:9102                    # chat;  http://localhost:9100 = STT test console;  http://localhost:8080/healthz = router
+#   ROUTER_URL=http://host.docker.internal:8080/v1/turns docker compose up -d   # point the chat at a router running on the host instead
+# GPU (needs the NVIDIA container toolkit):  docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
+services:
+  router:
+    build:
+      context: .
+      dockerfile: docker/router.Dockerfile
+    image: voice-samurai/router
+    ports: ["${ROUTER_PORT:-8080}:8080"]              # host port; ROUTER_PORT=18080 if 8080 is taken (the chat reaches it in-network)
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
+      API_TOKEN: ${API_TOKEN:-}                    # optional bearer token; the chat sends it as ROUTER_TOKEN
+      LISTEN_ADDR: 0.0.0.0:8080
+    restart: unless-stopped
+
+  stt:
+    build:
+      context: .
+      dockerfile: docker/stt.Dockerfile
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+    image: voice-samurai/stt
+    ports: ["9100:9100"]
+    volumes: ["speech-models:/models"]
+    environment:
+      STT_DEVICE: ${STT_DEVICE:-auto}
+      STT_UI: ${STT_UI:-1}
+      HF_TOKEN: ${HF_TOKEN:-}          # optional; or pre-seed weights with scripts/docker_seed_models.sh
+    restart: unless-stopped
+
+  tts:
+    build:
+      context: .
+      dockerfile: docker/tts.Dockerfile
+      args:
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
+    image: voice-samurai/tts
+    ports: ["9101:9101"]
+    volumes: ["speech-models:/models"]
+    environment:
+      TTS_DEVICE: ${TTS_DEVICE:-auto}
+      TTS_KK_VOICES: ${TTS_KK_VOICES:-female1,male1}
+    restart: unless-stopped
+
+  chat:
+    build:
+      context: .
+      dockerfile: docker/chat.Dockerfile
+    image: voice-samurai/chat
+    ports: ["9102:9102"]
+    environment:
+      ROUTER_URL: ${ROUTER_URL:-http://router:8080/v1/turns}   # Go router; http://host.docker.internal:8080/v1/turns for one on the host
+      ROUTER_TOKEN: ${API_TOKEN:-}
+      ROUTER_MODE: ${ROUTER_MODE:-auto}            # auto = Go router if reachable else mock | remote | mock
+      TTS_LANG: ${TTS_LANG:-auto}
+      TTS_VOICE_RU: ${TTS_VOICE_RU:-}
+      TTS_VOICE_KK: ${TTS_VOICE_KK:-}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on:
+      router: { condition: service_started }       # not "healthy": the chat still works (mock router) while the router has no API key
+      stt: { condition: service_healthy }
+      tts: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  speech-models:
+    name: speech-models                            # fixed name, so the downloaded weights survive renaming the checkout

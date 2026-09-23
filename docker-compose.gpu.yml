@@ -1,0 +1,9 @@
+# Overlay for hosts with an NVIDIA GPU and the NVIDIA container toolkit:
+#   TORCH_INDEX=https://download.pytorch.org/whl/cu128 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d
+services:
+  stt:
+    build: { args: { TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu128} } }
+    deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: all, capabilities: [gpu] }] } } }
+  tts:
+    build: { args: { TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu128} } }
+    deploy: { resources: { reservations: { devices: [{ driver: nvidia, count: all, capabilities: [gpu] }] } } }

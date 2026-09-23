@@ -9,3 +9,9 @@ require (
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/text v0.24.0 // indirect
 )
+
+// The catalog/knowledge base is embedded from ../voice_router_dataset, which is
+// shared with the Python services, so it is wired in as a local module.
+require voice-router/voice_router_dataset v0.0.0
+
+replace voice-router/voice_router_dataset => ../voice_router_dataset

@@ -1,0 +1,13 @@
+.venv/
+.venv-tts/
+.run/
+.env
+__pycache__/
+*.pyc
+.DS_Store
+__MACOSX/
+# downloaded weights and sample audio (see stt/README.md and tts/README.md)
+stt/models/
+stt/samples/*.wav
+tts/models/
+latest_silero_models.yml

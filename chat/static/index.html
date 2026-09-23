@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Samurai</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&family=Noto+Serif:ital,wght@0,400;0,600;1,400&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="seigaiha" aria-hidden="true"></div>
+
+<header class="top">
+  <div class="brand">
+    <span class="kanji" aria-hidden="true">声</span>
+    <div>
+      <h1>Voice Samurai <span class="sub">声の侍 · Saqta Insurance</span></h1>
+      <div class="crests">
+        <span class="crest" id="crestStt" title="speech-to-text service">STT</span>
+        <span class="crest" id="crestTts" title="text-to-speech service">TTS</span>
+        <span class="crest" id="crestRouter" title="dialogue router (Go service)">ROUTER</span>
+        <span class="crest" id="crestWs" title="websocket">LINK</span>
+      </div>
+    </div>
+  </div>
+  <div class="controls">
+    <label class="toggle"><input type="checkbox" id="handsFree"> hands-free</label>
+    <label class="toggle"><input type="checkbox" id="autoplay" checked> voice replies</label>
+    <button class="ghost" id="traceBtn" title="show the routing trace">巻 trace</button>
+  </div>
+</header>
+<svg class="brush" viewBox="0 0 1200 24" preserveAspectRatio="none" aria-hidden="true"><path d="M0 14 C 120 4, 260 22, 400 12 S 700 2, 860 14 S 1100 20, 1200 10 L1200 24 L0 24 Z" fill="currentColor"/></svg>
+
+<main class="layout">
+  <section class="scroll" id="chat" aria-live="polite">
+    <div class="msg bot intro">
+      <div class="seal" aria-hidden="true">侍</div>
+      <div class="paper">
+        <p>Сәлеметсіз бе! Здравствуйте. Говорите по-казахски или по-русски: я расшифрую вашу речь, отправлю запрос агенту и отвечу голосом.</p>
+        <span class="meta">Hold the seal to talk, or type below.</span>
+      </div>
+    </div>
+  </section>
+
+  <aside class="byobu" id="trace" hidden>
+    <h2>巻物 · Trace</h2>
+    <div id="traceBody" class="tracebody"><p class="dim">No turns yet.</p></div>
+  </aside>
+</main>
+
+<footer class="dock">
+  <div class="live" id="live" hidden>
+    <span class="dot"></span>
+    <span class="livetext" id="liveText">…</span>
+    <span class="blade"><i id="level"></i></span>
+    <span class="timer" id="timer">0.0 s</span>
+  </div>
+  <div class="bar">
+    <button class="hanko" id="mic" aria-label="hold to talk">
+      <span class="ring"></span>
+      <span class="glyph">声</span>
+    </button>
+    <form class="typebox" id="form" autocomplete="off">
+      <input id="text" placeholder="…or write your request (Kazakh / Russian)" maxlength="2000">
+      <button type="submit" class="send" aria-label="send">送</button>
+    </form>
+  </div>
+  <div class="hint" id="hint">Hold the seal (or Space) and speak. Release to send.</div>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

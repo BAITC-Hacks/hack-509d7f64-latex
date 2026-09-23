@@ -11,23 +11,76 @@ The proposed Voice Router is not only a voice bot. Its main product is a decisio
 S2T -> normalize (Ayat)
 Classfier -> in memory key value -> scenario tools -> tools (Sanzhar)
 
+## Repository layout
+
+| Folder | What | Port |
+|---|---|---|
+| `backend/` | **Layer 2**: Go LLM router (OpenAI Responses API + Structured Outputs), synthetic backend, in-memory sessions | 8080 |
+| `stt/` | **Layer 1 input**: wav2vec2-CTC Kazakh/Russian STT (`alibiserikbay/kazakh-russian-mixed-stt`) + browser test console | 9100 |
+| `tts/` | **Layer 3 output**: Silero v5 (Russian) + ISSAI KazakhTTS (Kazakh), routed per sentence | 9101 |
+| `chat/` | **Voice Samurai** frontend + gateway: mic → STT → router → TTS, trace panel | 9102 |
+| `docker/`, `docker-compose.yml` | the four services as containers (`docker-compose.gpu.yml` = NVIDIA overlay) | |
+| `scripts/` | `speech_services.sh` start/stop/status for the Python services, `docker_seed_models.sh` for offline weights | |
+| `voice_router_dataset/` | the case dataset: embedded into the Go binary, read by the chat mock and the STT console | |
+
+```
+browser ──ws──▶ chat gateway (:9102) ──▶ STT (:9100)              transcript + language
+                                     ──▶ Go router (:8080)  POST /v1/turns  ──▶ answer + trace
+                                     ──▶ TTS (:9101)              spoken reply ──▶ browser
+```
+
+## Run everything with Docker
+
+```bash
+cp .env.example .env              # set OPENAI_API_KEY (the router exits without it; the chat then uses its keyword mock)
+docker compose up --build -d      # CPU images; first start downloads ~1 GB of speech weights into the "speech-models" volume
+open http://localhost:9102        # chat  (http://localhost:9100 = STT test console, http://localhost:8080/healthz = router)
+docker compose logs -f router     # scenario decisions and latency per turn
+docker compose down               # stop (weights stay in the volume)
+```
+
+GPU hosts with the NVIDIA container toolkit:
+`docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build -d`.
+
+If the `stt` container keeps restarting with a Hugging Face `401`, anonymous downloads are being
+blocked from your network: either set `HF_TOKEN=hf_...` in `.env`, or download once on the host
+(`.venv/bin/python stt/download_model.py`, `.venv-tts/bin/python tts/download_models.py`) and run
+`scripts/docker_seed_models.sh` to copy the weights into the volume.
+
+To use a router running outside Docker: `ROUTER_URL=http://host.docker.internal:8080/v1/turns docker compose up -d`.
+With `API_TOKEN` set in `.env`, the router requires it as a bearer token and the chat sends it automatically.
+
+## Run locally (venvs, GPU)
+
+```bash
+cd backend && OPENAI_API_KEY=sk-... go run ./cmd/router     # http://127.0.0.1:8080
+scripts/speech_services.sh start                             # STT + TTS + chat; the chat looks for the router at :8080 (add --ui for the STT console)
+scripts/speech_services.sh status | stop | logs
+```
+
+First-time setup (venvs, weights) is described in `stt/README.md` and `tts/README.md`;
+the gateway and its router contract in `chat/README.md`.
+
 ## Layer 2 implementation (Go)
 
-This repository now implements **only the classifier/router layer**. It accepts
+`backend/` implements the **classifier/router layer**. It accepts
 normalized text from layer 1 and returns an answer plus a supervisor trace for
-layer 3. Speech recognition, normalization, TTS, and the frontend are separate
-team components.
+layer 3. Speech recognition (`stt/`), TTS (`tts/`) and the frontend/gateway
+(`chat/`) live next to it in this repository and talk to it over HTTP.
 
 The “classifier” is an **OpenAI LLM router**, as required by the brief. It does
 not train an encoder intent classifier or map evaluation utterances to labels.
 The fixed 40 scenarios, three system intents, slot definitions, knowledge base,
-and synthetic backend are embedded into the Go binary. The dataset remains the
-source of the hardcoded catalog; there is no scenario-editing endpoint.
+and synthetic backend are embedded into the Go binary from `voice_router_dataset/`
+(wired into `backend/go.mod` as a local module, so the same files also serve the
+Python services). The dataset remains the source of the hardcoded catalog; there
+is no scenario-editing endpoint.
 
 ### Run
 
 Requires Go 1.25 or later and an OpenAI API key. There are no third-party Go
-dependencies and no database to install. From this directory in PowerShell:
+dependencies and no database to install. From `backend/` in PowerShell
+(`docker compose up router` runs the same binary in a container on port 8080):
 
 ```powershell
 $env:OPENAI_API_KEY = "your-key"
@@ -124,8 +177,9 @@ Other endpoints:
 | `GET /v1/scenarios` | Fixed scenario catalog for the operator frontend. |
 | `GET /v1/sessions/{session_id}` | Stored inputs, answers, decisions, tool results, active workflow, suspended topics, and queue. |
 
-The frontend can display the returned scenarios and trace. Manual operator
-overrides and actual telephony transfers are outside this implementation.
+The chat frontend displays the returned scenarios and trace (`chat/README.md`
+describes how the gateway maps them). Manual operator overrides and actual
+telephony transfers are outside this implementation.
 
 ### Execution and state
 

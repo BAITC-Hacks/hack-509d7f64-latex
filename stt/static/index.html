@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STT Test Console</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>STT Test Console</h1>
+    <span id="health" class="pill">connecting…</span>
+    <span id="ttsHealth" class="pill" title="TTS service (tts/server.py)">tts…</span>
+  </div>
+  <div class="settings">
+    <label><input type="checkbox" id="optVad" checked> VAD chunking</label>
+    <label><input type="checkbox" id="optLive" checked> Live transcript while recording</label>
+    <label><input type="checkbox" id="optAutoStop" checked> Auto-stop after 1.5 s of silence</label>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="mic" class="active">Microphone</button>
+  <button data-tab="read">Read-aloud test</button>
+  <button data-tab="upload">Upload</button>
+  <button data-tab="samples">Samples</button>
+  <button data-tab="tts">Synthesis</button>
+  <button data-tab="history">History <span id="histCount" class="badge">0</span></button>
+</nav>
+
+<main>
+  <!-- 1. free microphone -->
+  <section class="panel active" id="panel-mic">
+    <div class="card">
+      <div class="recwrap" id="micRec">
+        <button class="micbtn" title="Click to start / stop. Hold Space for push-to-talk."><svg viewBox="0 0 24 24" width="30" height="30"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg></button>
+        <div class="recinfo">
+          <div class="row"><span class="timer">0.0 s</span><span class="meter"><i></i></span></div>
+          <div class="hint">Speak Kazakh, Russian, or mix them. Click the mic or hold <kbd>Space</kbd>. Mic access needs <code>localhost</code> or HTTPS.</div>
+          <div class="live" hidden></div>
+        </div>
+      </div>
+      <div class="out"></div>
+    </div>
+  </section>
+
+  <!-- 2. read-aloud test against dev_utterances -->
+  <section class="panel" id="panel-read">
+    <div class="card">
+      <div class="row filters">
+        <label>Language <select id="uLang"><option value="">all</option><option value="ru">ru</option><option value="kk">kk</option><option value="mixed">mixed</option></select></label>
+        <label>Type <select id="uType"><option value="">all</option><option value="single">single</option><option value="multi_intent">multi_intent</option><option value="out_of_scope">out_of_scope</option><option value="unclear">unclear</option></select></label>
+        <span class="spacer"></span>
+        <button class="secondary" id="uPrev">‹ Prev</button>
+        <button class="secondary" id="uRandom">Random</button>
+        <button class="secondary" id="uNext">Next ›</button>
+      </div>
+      <div class="phrasebox">
+        <div class="phrasemeta" id="uMeta">loading phrases…</div>
+        <div class="phrase" id="uText"></div>
+        <div class="phrasemeta" id="uScen"></div>
+      </div>
+      <div class="recwrap" id="readRec">
+        <button class="micbtn" title="Click to start / stop. Hold Space for push-to-talk."><svg viewBox="0 0 24 24" width="30" height="30"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v5a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg></button>
+        <div class="recinfo">
+          <div class="row"><span class="timer">0.0 s</span><span class="meter"><i></i></span></div>
+          <div class="hint">Read the phrase above, then stop. The transcript is scored against it word by word.</div>
+          <div class="live" hidden></div>
+        </div>
+      </div>
+      <div class="out"></div>
+    </div>
+  </section>
+
+  <!-- 3. upload -->
+  <section class="panel" id="panel-upload">
+    <div class="card">
+      <div class="drop" id="drop">
+        <input type="file" id="fileIn" accept="audio/*,video/webm,.ogg,.opus,.m4a,.mp3,.wav,.flac" multiple hidden>
+        <div><b>Drop audio files here</b> or <button class="link" id="browse">browse</button></div>
+        <div class="hint">wav, mp3, ogg/opus, webm, m4a, flac — any sample rate, resampled to 16 kHz. Optional reference text below is scored against the transcript.</div>
+      </div>
+      <textarea id="upRef" rows="2" placeholder="Reference text (optional) — what the audio should say"></textarea>
+      <div class="out" id="upOut"></div>
+    </div>
+  </section>
+
+  <!-- 4. bundled samples -->
+  <section class="panel" id="panel-samples">
+    <div class="card">
+      <div class="row">
+        <button id="allBtn" class="secondary">Transcribe all</button>
+        <span id="allSummary" class="muted"></span>
+        <span class="spacer"></span>
+        <span class="hint">FLEURS test clips with reference text (CC-BY-4.0).</span>
+      </div>
+      <table class="tbl" id="samples"><tbody></tbody></table>
+    </div>
+  </section>
+
+  <!-- 5. text-to-speech -->
+  <section class="panel" id="panel-tts">
+    <div class="card">
+      <div class="row filters">
+        <label>Scenario reply <select id="ttsPick"><option value="">— pick a reply from scenarios.json —</option></select></label>
+        <span class="spacer"></span>
+        <label>Language <select id="ttsLang"><option value="auto">auto (per sentence)</option><option value="ru">ru · Silero v5</option><option value="kk">kk · KazakhTTS</option></select></label>
+        <label>RU voice <select id="ttsVoiceRu"><option value="">default</option></select></label>
+        <label>KK voice <select id="ttsVoiceKk"><option value="">default</option></select></label>
+      </div>
+      <textarea id="ttsText" rows="3">Сәлеметсіз бе! Сізге қалай көмектесе аламын? Стоимость ОГПО зависит от региона и стажа водителя.</textarea>
+      <div class="row" style="margin-top:10px">
+        <button id="ttsSpeak">🔊 Synthesize &amp; play</button>
+        <span class="hint">Russian → Silero v5 (48 kHz model, served at 24 kHz). Kazakh → ISSAI Tacotron2 + ParallelWaveGAN (22 kHz). <b>auto</b> routes each sentence by script: any Kazakh-only letter → Kazakh engine.</span>
+      </div>
+      <div class="out" id="ttsOut"></div>
+    </div>
+  </section>
+
+  <!-- 6. history -->
+  <section class="panel" id="panel-history">
+    <div class="card">
+      <div class="row">
+        <span id="histSummary" class="muted">Nothing transcribed yet in this session.</span>
+        <span class="spacer"></span>
+        <button class="secondary" id="histExport">Export JSON</button>
+        <button class="secondary" id="histClear">Clear</button>
+      </div>
+      <table class="tbl" id="history"><tbody></tbody></table>
+    </div>
+  </section>
+
+  <footer class="muted small">
+    Model <a href="https://huggingface.co/alibiserikbay/kazakh-russian-mixed-stt" target="_blank" rel="noopener">alibiserikbay/kazakh-russian-mixed-stt</a>
+    (wav2vec2-CTC, greedy). Output is lowercase, unpunctuated, numbers as words. API:
+    <code>curl -F file=@a.wav -F reference="…" localhost:9100/transcribe</code>
+  </footer>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

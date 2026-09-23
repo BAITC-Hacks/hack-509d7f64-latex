@@ -1,0 +1,8 @@
+torch>=2.9
+numpy
+soundfile
+onnxruntime
+huggingface_hub
+fastapi
+uvicorn[standard]
+python-multipart

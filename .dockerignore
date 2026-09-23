@@ -1,0 +1,12 @@
+.git
+.venv
+.venv-tts
+.run
+.env
+**/__pycache__
+stt/models
+tts/models
+latest_silero_models.yml
+backend/*.exe
+backend/predictions.json
+*.pdf

@@ -14,6 +14,7 @@ import (
 
 type OpenAI struct {
 	Key, Model, BaseURL string
+	FastModel           string // small model for RouteOptions.Fast
 	HTTP                *http.Client
 	Catalog             *Catalog
 	routeInstructions   string
@@ -219,14 +220,21 @@ func (o *OpenAI) retrieveScenario(call responseItem) (Values, error) {
 	return nil, fmt.Errorf("unknown get_scenario scenario_id")
 }
 
-func (o *OpenAI) Route(ctx context.Context, in Input, state Session) (Decision, error) {
+func (o *OpenAI) Route(ctx context.Context, in Input, state Session, opts RouteOptions) (Decision, error) {
+	model := o.Model
+	if opts.Fast && o.FastModel != "" {
+		model = o.FastModel
+	}
+	if opts.Model != "" {
+		model = opts.Model
+	}
 	messages, err := routingMessages(in, state)
 	if err != nil {
 		return Decision{}, fmt.Errorf("build routing context: %w", err)
 	}
 	seenCalls := map[string]bool{}
 	for round := 0; round < 4; round++ {
-		payload := responseRequest(o.Model, o.routeInstructions, "route", messages, o.routeSchema)
+		payload := responseRequest(model, o.routeInstructions, "route", messages, o.routeSchema)
 		payload["tools"] = o.routeTools
 		payload["parallel_tool_calls"] = false
 		// Reasoning models need their opaque reasoning items replayed when

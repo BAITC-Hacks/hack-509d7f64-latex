@@ -19,7 +19,7 @@ type fakeModel struct {
 	respondErr error
 }
 
-func (m *fakeModel) Route(ctx context.Context, in Input, s Session) (Decision, error) {
+func (m *fakeModel) Route(ctx context.Context, in Input, s Session, _ RouteOptions) (Decision, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls++
@@ -273,7 +273,7 @@ func TestExecutionBudgetProducesStoredHandoff(t *testing.T) {
 
 type concurrentModel struct{ calls atomic.Int32 }
 
-func (m *concurrentModel) Route(context.Context, Input, Session) (Decision, error) {
+func (m *concurrentModel) Route(context.Context, Input, Session, RouteOptions) (Decision, error) {
 	m.calls.Add(1)
 	time.Sleep(10 * time.Millisecond)
 	return decision("SC33", Values{"city": "Almaty"}), nil

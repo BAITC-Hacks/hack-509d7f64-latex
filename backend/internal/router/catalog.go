@@ -15,6 +15,7 @@ type Scenario struct {
 	Description string   `json:"description"`
 	Boundaries  []Values `json:"not_this_if"`
 	Priority    string   `json:"priority"`
+	FastPath    bool     `json:"fast_path_eligible"`
 	Identify    bool     `json:"requires_identification"`
 	Slots       struct {
 		Required []string `json:"required"`

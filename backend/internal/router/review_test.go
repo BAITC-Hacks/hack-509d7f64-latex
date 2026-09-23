@@ -120,7 +120,7 @@ type contextCheckingModel struct {
 	calls int
 }
 
-func (m *contextCheckingModel) Route(ctx context.Context, in Input, s Session) (Decision, error) {
+func (m *contextCheckingModel) Route(ctx context.Context, in Input, s Session, _ RouteOptions) (Decision, error) {
 	m.calls++
 	for _, turn := range s.Turns {
 		if turn.Input.RequestID == in.RequestID {

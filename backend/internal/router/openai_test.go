@@ -66,7 +66,7 @@ func TestOpenAIResponsesWireContract(t *testing.T) {
 	m := NewOpenAI("test-secret", "test-model", c)
 	m.BaseURL = server.URL
 	m.HTTP = server.Client()
-	d, err := m.Route(context.Background(), input("one", "Астана офис"), Session{})
+	d, err := m.Route(context.Background(), input("one", "Астана офис"), Session{}, RouteOptions{})
 	if err != nil || d.Slots["city"] != "Astana" || d.Language != "kk" {
 		t.Fatal(d, err)
 	}
@@ -124,7 +124,7 @@ func TestOpenAIToolRoundTrip(t *testing.T) {
 		events = append(events, Values{"kind": kind, "payload": clone(payload)})
 		return nil
 	})
-	decision, err := m.Route(ctx, input("one", "Астана офис"), Session{})
+	decision, err := m.Route(ctx, input("one", "Астана офис"), Session{}, RouteOptions{})
 	if err != nil || decision.Slots["city"] != "Astana" || calls.Load() != 2 {
 		t.Fatal(decision, err, calls.Load())
 	}
@@ -174,7 +174,7 @@ func TestOpenAIPromptStableAcrossInputs(t *testing.T) {
 	defer server.Close()
 	m := modelForServer(t, server)
 	for _, text := range []string{"FIRST_UNIQUE_TEXT", "SECOND_UNIQUE_TEXT"} {
-		if _, err := m.Route(context.Background(), input(text, text), Session{}); err != nil {
+		if _, err := m.Route(context.Background(), input(text, text), Session{}, RouteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -221,7 +221,7 @@ func TestOpenAIRejectsInvalidRoutingTools(t *testing.T) {
 				writeJSON(w, 200, Values{"status": "completed", "output": []any{Values{"type": "function_call", "call_id": test.callID, "name": test.tool, "arguments": test.arguments}}})
 			}))
 			defer server.Close()
-			_, err := modelForServer(t, server).Route(context.Background(), input("one", "text"), Session{})
+			_, err := modelForServer(t, server).Route(context.Background(), input("one", "text"), Session{}, RouteOptions{})
 			if err == nil || !strings.Contains(err.Error(), test.want) || calls.Load() != 1 {
 				t.Fatal(err, calls.Load())
 			}
@@ -241,7 +241,7 @@ func TestOpenAIToolLoopLimitAndDuplicateCall(t *testing.T) {
 				writeJSON(w, 200, Values{"status": "completed", "output": []any{Values{"type": "function_call", "call_id": id, "name": "get_scenario", "arguments": `{"scenario_id":"SC33"}`}}})
 			}))
 			defer server.Close()
-			_, err := modelForServer(t, server).Route(context.Background(), input("one", "text"), Session{})
+			_, err := modelForServer(t, server).Route(context.Background(), input("one", "text"), Session{}, RouteOptions{})
 			wantCalls, wantError := int32(4), "limit reached"
 			if duplicate {
 				wantCalls, wantError = 2, "duplicate routing tool call_id"
@@ -262,7 +262,7 @@ func TestOpenAICheckpointFailureStopsModelLoop(t *testing.T) {
 	defer server.Close()
 	checkpointError := errors.New("database unavailable")
 	ctx := withRouteRecorder(context.Background(), func(string, Values) error { return checkpointError })
-	_, err := modelForServer(t, server).Route(ctx, input("one", "text"), Session{})
+	_, err := modelForServer(t, server).Route(ctx, input("one", "text"), Session{}, RouteOptions{})
 	if !errors.Is(err, checkpointError) || calls.Load() != 1 {
 		t.Fatal("model advanced past failed persistence", err, calls.Load())
 	}
@@ -321,7 +321,7 @@ func TestOpenAIRetryAndFailures(t *testing.T) {
 			m := NewOpenAI("key", "model", c)
 			m.BaseURL = server.URL
 			m.HTTP = server.Client()
-			_, err := m.Route(context.Background(), input("one", "text"), Session{})
+			_, err := m.Route(context.Background(), input("one", "text"), Session{}, RouteOptions{})
 			if err == nil || strings.Contains(err.Error(), "secret") || int(calls.Load()) != test.wantCalls {
 				t.Fatal(err, calls.Load())
 			}

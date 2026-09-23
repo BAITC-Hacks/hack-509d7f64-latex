@@ -12,6 +12,9 @@ import (
 )
 
 func main() {
+	if err := router.LoadDotEnv(".env"); err != nil {
+		log.Fatal(err)
+	}
 	key := os.Getenv("OPENAI_API_KEY")
 	if key == "" {
 		log.Fatal("Set OPENAI_API_KEY before starting the classifier")
@@ -47,7 +50,17 @@ func main() {
 		log.Fatal("PostgreSQL is not ready; run go run ./cmd/migrate: ", err)
 	}
 	cancelStartup()
-	engine := router.NewEngine(catalog, router.NewOpenAI(key, model, catalog), repo)
+	fastModel := os.Getenv("OPENAI_FAST_MODEL")
+	if fastModel == "" {
+		fastModel = "gpt-4.1-nano"
+	}
+	openai := router.NewOpenAI(key, model, catalog)
+	openai.FastModel = fastModel
+	engine := router.NewEngine(catalog, openai, repo)
+	engine.Policy.FallbackModel = os.Getenv("OPENAI_FALLBACK_MODEL")
+	if engine.Policy.FallbackModel == "" {
+		engine.Policy.FallbackModel = fastModel
+	}
 	server := &http.Server{Addr: addr, Handler: router.Handler(engine, apiToken, operatorToken), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 70 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -57,7 +70,7 @@ func main() {
 		defer cancel()
 		_ = server.Shutdown(shutdown)
 	}()
-	log.Printf("Layer 2 classifier listening on %s; model=%s; backend=synthetic; store=postgresql", addr, model)
+	log.Printf("Layer 2 classifier listening on %s; model=%s; fast=%s; fallback=%s; backend=synthetic; store=postgresql", addr, model, fastModel, engine.Policy.FallbackModel)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}

@@ -46,6 +46,39 @@ type Trace struct {
 	LatencyMS  map[string]int64 `json:"latency_ms"`
 	Error      string           `json:"error,omitempty"`
 	Proposals  []Decision       `json:"proposals,omitempty"`
+	// Path is how the scenario was chosen: bypass (deterministic continuation,
+	// no model call), fast (small model over a few candidates), full (main
+	// model over the shortlist and dialog state) or fast>full (escalated).
+	Path           string           `json:"path,omitempty"`
+	Shortlist      []ScoredScenario `json:"shortlist,omitempty"`
+	Uncertainty    *Uncertainty     `json:"uncertainty,omitempty"`
+	FallbackLevel  int              `json:"fallback_level"`
+	ResponseSource string           `json:"response_source,omitempty"`
+}
+
+// ScoredScenario is one retrieval candidate. Retrieval only narrows the
+// candidates shown to the model; it never assigns a scenario.
+type ScoredScenario struct {
+	ScenarioID string  `json:"scenario_id"`
+	Score      float64 `json:"score"`
+}
+
+// Uncertainty is computed in Go from observable signals; the model's own
+// confidence is one component, not the verdict.
+type Uncertainty struct {
+	Score      float64            `json:"score"`
+	Components map[string]float64 `json:"components"`
+	Verdict    string             `json:"verdict"`
+	Boundary   string             `json:"boundary,omitempty"`
+}
+
+// RouteOptions narrows one routing call. Candidates are shown to the model in
+// full detail; Fast selects the small model and a candidates-only prompt;
+// Model overrides the model ID (fallback ladder).
+type RouteOptions struct {
+	Candidates []string
+	Fast       bool
+	Model      string
 }
 type Output struct {
 	SessionID        string        `json:"session_id"`
@@ -69,6 +102,8 @@ type Frame struct {
 	Results    []ActionCall   `json:"results"`
 	Pending    *Pending       `json:"pending,omitempty"`
 	Failures   map[string]int `json:"failures"`
+	// Awaiting lists the slot names (alternatives) the last question asked for.
+	Awaiting []string `json:"awaiting,omitempty"`
 }
 type Turn struct {
 	Input  Input   `json:"input"`
@@ -96,7 +131,7 @@ type UserReviewLink struct {
 	InputHash     string `json:"input_hash"`
 }
 type Model interface {
-	Route(context.Context, Input, Session) (Decision, error)
+	Route(context.Context, Input, Session, RouteOptions) (Decision, error)
 	Respond(context.Context, string, Values) (string, error)
 }
 

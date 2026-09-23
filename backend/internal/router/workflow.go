@@ -48,6 +48,7 @@ func (w *work) prepare() error {
 		}
 	}
 	w.e.fillSlots(f, d.Slots)
+	f.Awaiting = nil
 	for k, v := range w.s.Identity {
 		if !has(f.Slots, k) {
 			f.Slots[k] = v
@@ -102,7 +103,7 @@ func (w *work) execute() error {
 	sc := w.e.Catalog.Scenarios[f.ScenarioID]
 	if sc.Identify && !has(w.s.Identity, "client_id") {
 		if !has(f.Slots, "phone") && !has(f.Slots, "iin") {
-			return w.finish(w.e.question(w.s, f, "phone"), "awaiting_slot")
+			return w.ask(f, w.e.question(w.s, f, "phone"), "phone", "iin")
 		}
 		return w.tool("find_client", Values{"phone": f.Slots["phone"], "iin": f.Slots["iin"]}, func(result Values) {
 			if errorCode(result) != "" {
@@ -138,9 +139,10 @@ func (w *work) execute() error {
 		if !has(f.Slots, slot) {
 			question := w.e.question(w.s, f, slot)
 			if sc.Priority == "urgent" {
+				f.Awaiting = []string{slot}
 				return w.queueAnswer(Values{"purpose": "give immediate safety guidance, then ask only this question", "question": question, "scenario": sc, "knowledge": w.e.Catalog.KB}, question, "awaiting_slot", false)
 			}
-			return w.finish(question, "awaiting_slot")
+			return w.ask(f, question, slot)
 		}
 	}
 	if f.NextAction >= len(sc.Actions) {
@@ -159,7 +161,7 @@ func (w *work) execute() error {
 			present = present || has(args, slot)
 		}
 		if !present {
-			return w.finish(w.e.question(w.s, f, strings.Split(group, "|")[0]), "awaiting_slot")
+			return w.ask(f, w.e.question(w.s, f, strings.Split(group, "|")[0]), strings.Split(group, "|")...)
 		}
 	}
 	if action.Irreversible && !w.r.ActionApproved {
@@ -223,7 +225,7 @@ func (w *work) toolError() error {
 			w.r.Phase = "handoff"
 			return w.save("identification_failed", nil)
 		}
-		return w.finish(local(w.s.Language, "Клиент не найден. Назовите ИИН или проверьте номер телефона.", "Клиент табылмады. ЖСН-ді айтыңыз немесе телефон нөмірін тексеріңіз."), "awaiting_slot")
+		return w.ask(f, local(w.s.Language, "Клиент не найден. Назовите ИИН или проверьте номер телефона.", "Клиент табылмады. ЖСН-ді айтыңыз немесе телефон нөмірін тексеріңіз."), "phone", "iin")
 	}
 	if code == "service_unavailable" && f.Failures[call.Name] == 1 {
 		w.r.ActionApproved = w.e.Catalog.Actions[call.Name].Irreversible
@@ -239,9 +241,30 @@ func (w *work) toolError() error {
 			delete(f.Slots, key)
 		}
 	}
+	f.Awaiting = nil
 	return w.queueAnswer(Values{"purpose": "explain failure and ask for corrected data or offer operator", "action": call}, local(w.s.Language, "Не удалось выполнить действие. Уточните данные или попросите оператора.", "Әрекет орындалмады. Деректерді нақтылаңыз немесе операторды сұраңыз."), "awaiting_slot", false)
 }
+
+// ask finishes the turn with a slot question and remembers which slots it
+// asked for, so a bare answer next turn can continue without a model call.
+func (w *work) ask(f *Frame, question string, slots ...string) error {
+	if f != nil {
+		f.Awaiting = slots
+	}
+	return w.finish(question, "awaiting_slot")
+}
+
+// queueAnswer answers from a catalog template when one covers the facts, and
+// otherwise schedules LLM wording with a deterministic fallback.
 func (w *work) queueAnswer(facts Values, fallback, status string, complete bool) error {
+	if text, ok := w.e.template(w.s, facts, status); ok {
+		w.r.Output.Trace.ResponseSource = "template"
+		if complete {
+			w.s.LastCompleted = clone(w.s.Active)
+			w.s.Active = nil
+		}
+		return w.finish(text, status)
+	}
 	w.r.AnswerFacts = facts
 	w.r.Fallback = fallback
 	w.r.FinalStatus = status
@@ -257,8 +280,10 @@ func (w *work) generate() error {
 	answer, err := w.e.Model.Respond(w.ctx, w.s.Language, w.r.AnswerFacts)
 	w.r.Output.Trace.LatencyMS["response"] += time.Since(start).Milliseconds()
 	w.afterModel()
+	w.r.Output.Trace.ResponseSource = "llm"
 	if err != nil || strings.TrimSpace(answer) == "" {
 		w.r.Output.Trace.Error = "response generation failed"
+		w.r.Output.Trace.ResponseSource = "fallback"
 		answer = w.r.Fallback
 	}
 	if w.r.CompleteFrame {

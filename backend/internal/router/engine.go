@@ -20,15 +20,95 @@ var ErrInvalidInput = errors.New("invalid input")
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
 
 type Engine struct {
-	Catalog  *Catalog
-	Store    Repository
-	Model    Model
-	MaxSteps int
-	Timeout  time.Duration
+	Catalog   *Catalog
+	Store     Repository
+	Model     Model
+	Retriever *Retriever
+	Policy    Policy
+	MaxSteps  int
+	Timeout   time.Duration
+}
+
+// Policy holds the turn loop's tunables. Defaults are starting points that
+// cmd/evaluate calibrates against the dataset.
+type Policy struct {
+	ShortlistSize  int           // scenarios the full route reads in detail
+	FastCandidates int           // scenarios the fast route chooses between
+	FastMargin     float64       // τ_fast: retrieval top-1 lead needed for the fast route
+	FastMinScore   float64       // minimum top-1 retrieval score for the fast route
+	Execute        float64       // τ_exec: uncertainty at or below this executes
+	Handoff        float64       // τ_handoff: uncertainty above this counts toward handoff
+	L2Margin       float64       // retrieval lead needed to clarify when every model failed
+	FastTimeout    time.Duration // L0 timeout on the fast route
+	FullTimeout    time.Duration // L0/L1 timeout on the full route
+	FallbackModel  string        // L1 model; empty repeats the default model
+}
+
+func DefaultPolicy() Policy {
+	return Policy{ShortlistSize: 8, FastCandidates: 3, FastMargin: .15, FastMinScore: .3, Execute: .25, Handoff: .55, L2Margin: .2, FastTimeout: 1500 * time.Millisecond, FullTimeout: 6 * time.Second}
 }
 
 func NewEngine(c *Catalog, m Model, repo Repository) *Engine {
-	return &Engine{Catalog: c, Store: repo, Model: m, MaxSteps: 24, Timeout: 60 * time.Second}
+	return &Engine{Catalog: c, Store: repo, Model: m, Retriever: NewRetriever(c), Policy: DefaultPolicy(), MaxSteps: 24, Timeout: 60 * time.Second}
+}
+
+// workflowIDs lists the scenarios already in play, which every shortlist keeps.
+func workflowIDs(s *Session) []string {
+	ids := []string{}
+	if s.Active != nil {
+		ids = append(ids, s.Active.ScenarioID)
+	}
+	for _, f := range append(append([]*Frame{}, s.Stack...), s.Queue...) {
+		ids = append(ids, f.ScenarioID)
+	}
+	return ids
+}
+
+// fastEligible is the gate: no workflow in progress, and retrieval clearly
+// favours one scenario the dataset marks fast_path_eligible.
+func (e *Engine) fastEligible(s *Session, shortlist []ScoredScenario) bool {
+	if len(shortlist) == 0 || s.Active != nil || len(s.Stack) > 0 || len(s.Queue) > 0 {
+		return false
+	}
+	top := shortlist[0]
+	sc, ok := e.Catalog.Scenarios[top.ScenarioID]
+	if !ok || !sc.FastPath || top.Score < e.Policy.FastMinScore {
+		return false
+	}
+	margin := top.Score
+	if len(shortlist) > 1 {
+		margin -= shortlist[1].Score
+	}
+	return margin >= e.Policy.FastMargin
+}
+
+// escalate sends a fast-route answer to the full route unless it is a single,
+// confident choice of the retrieval favourite.
+func (e *Engine) escalate(d Decision, shortlist []ScoredScenario) bool {
+	if len(d.Scenarios) != 1 || len(shortlist) == 0 {
+		return true
+	}
+	primary := d.Scenarios[0]
+	return primary.ScenarioID != shortlist[0].ScenarioID || primary.Confidence < 1-e.Policy.Execute
+}
+
+// retrievalClarification is fallback rung L2: when every model call failed,
+// ask whether the request matches retrieval's clear favourite. It names the
+// scenario through one of its own catalog examples and never executes.
+func (e *Engine) retrievalClarification(lang string, shortlist []ScoredScenario) (string, bool) {
+	if len(shortlist) == 0 {
+		return "", false
+	}
+	margin := shortlist[0].Score
+	if len(shortlist) > 1 {
+		margin -= shortlist[1].Score
+	}
+	sc, ok := e.Catalog.Scenarios[shortlist[0].ScenarioID]
+	if !ok || margin < e.Policy.L2Margin || len(sc.Examples[lang]) == 0 {
+		return "", false
+	}
+	example := sc.Examples[lang][0]
+	return local(lang, "Правильно понимаю, ваш вопрос такой: «"+example+"»? Ответьте «да» или уточните.", "Дұрыс түсіндім бе, сұрағыңыз мынадай ма: «"+example+"»? «Иә» деңіз немесе нақтылаңыз."), true
 }
 func (e *Engine) ValidateInput(in Input) error {
 	if !idPattern.MatchString(in.SessionID) || !idPattern.MatchString(in.RequestID) {
@@ -335,6 +415,9 @@ func (w *work) finish(answer, status string) error {
 	o := &w.r.Output
 	o.Answer = answer
 	o.Status = status
+	if o.Trace.ResponseSource == "" {
+		o.Trace.ResponseSource = "template"
+	}
 	o.Language = w.s.Language
 	o.ActiveScenario = ""
 	if w.s.Active != nil {
@@ -357,6 +440,29 @@ func (w *work) identify() error {
 		return w.finish(local(w.s.Language, "Уточните, пожалуйста, какой вопрос нужно решить?", "Қандай мәселені шешу керегін нақтылаңызшы?"), "clarification")
 	}
 	w.r.Attempts++
+	tr := &w.r.Output.Trace
+	fresh := w.r.Attempts == 1 && len(w.r.RoutingContext) == 0
+	// Stage 02: a continuation of the scenario the model chose on an earlier
+	// turn, fully consumed by the expected slot parser or yes/no lexicon.
+	if fresh {
+		start := time.Now()
+		d, ok := w.e.preRoute(w.s, w.r.Input)
+		tr.LatencyMS["prerouter"] += time.Since(start).Milliseconds()
+		if ok {
+			tr.Path = "bypass"
+			w.r.Decision = &d
+			w.r.Phase = "validating"
+			return w.save("routing_bypass", Values{"decision": d})
+		}
+	}
+	// Stage 03: retrieval shortlist. It narrows what the model reads in
+	// detail and provides an independent signal; it never picks a scenario.
+	start := time.Now()
+	shortlist := w.e.Retriever.Shortlist(w.r.Input.Text, w.e.Policy.ShortlistSize, workflowIDs(w.s)...)
+	tr.LatencyMS["retrieval"] += time.Since(start).Milliseconds()
+	tr.Shortlist = shortlist
+	// Stage 04: gate between the fast and the full route.
+	fast := fresh && w.e.fastEligible(w.s, shortlist)
 	if err := w.beforeModel("routing_started"); err != nil {
 		return err
 	}
@@ -387,24 +493,84 @@ func (w *work) identify() error {
 		}
 		return w.save(kind, data)
 	})
-	start := time.Now()
-	d, err := w.e.Model.Route(ctx, w.r.Input, state)
-	w.r.Output.Trace.LatencyMS["router"] += time.Since(start).Milliseconds()
+	d, err := w.route(ctx, state, shortlist, fast)
 	w.afterModel()
 	if err != nil {
-		if errors.Is(err, ErrDatabase) || errors.Is(err, ErrConflict) {
-			return err
+		if hard := w.hardError(err); hard != nil {
+			return hard
 		}
-		if w.l.Context().Err() != nil {
-			return fmt.Errorf("%w: lease lost", ErrDatabase)
+		tr.Error = err.Error()
+		// L2: retrieval alone may ask about its top candidate; it never executes.
+		if question, ok := w.e.retrievalClarification(w.s.Language, shortlist); ok {
+			tr.FallbackLevel = 2
+			return w.finish(question, "clarification")
 		}
-		w.r.Output.Trace.Error = err.Error()
+		// L3: hand off with context.
+		tr.FallbackLevel = 3
 		w.r.Phase = "handoff"
 		return w.save("routing_failed", Values{"error": err.Error()})
 	}
 	w.r.Decision = &d
 	w.r.Phase = "validating"
 	return w.save("routing_received", nil)
+}
+
+// hardError reports failures that must abort the turn instead of falling back:
+// lost persistence or a lost session lease.
+func (w *work) hardError(err error) error {
+	if errors.Is(err, ErrDatabase) || errors.Is(err, ErrConflict) {
+		return err
+	}
+	if w.l.Context().Err() != nil {
+		return fmt.Errorf("%w: lease lost", ErrDatabase)
+	}
+	return nil
+}
+
+// route runs rungs L0 and L1 of the fallback ladder. L0 is the route chosen by
+// the gate; a fast route escalates to the full route when its answer is not
+// clearly the retrieval favourite. L1 repeats the full route on the fallback
+// model. The caller handles L2 (retrieval-only clarification) and L3 (handoff).
+func (w *work) route(ctx context.Context, state Session, shortlist []ScoredScenario, fast bool) (Decision, error) {
+	p, tr := w.e.Policy, &w.r.Output.Trace
+	candidates := make([]string, 0, len(shortlist))
+	for _, c := range shortlist {
+		candidates = append(candidates, c.ScenarioID)
+	}
+	call := func(opts RouteOptions, timeout time.Duration) (Decision, error) {
+		c, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		start := time.Now()
+		d, err := w.e.Model.Route(c, w.r.Input, state, opts)
+		tr.LatencyMS["router"] += time.Since(start).Milliseconds()
+		if err == nil {
+			err = w.e.validateDecision(d)
+		}
+		return d, err
+	}
+	tr.Path = "full"
+	if fast {
+		tr.Path = "fast"
+		few := candidates[:min(p.FastCandidates, len(candidates))]
+		d, err := call(RouteOptions{Candidates: few, Fast: true}, p.FastTimeout)
+		if err == nil && !w.e.escalate(d, shortlist) {
+			return d, nil
+		}
+		if err != nil {
+			if hard := w.hardError(err); hard != nil {
+				return d, hard
+			}
+			tr.Error = "fast route: " + err.Error()
+		}
+		tr.Path = "fast>full"
+	}
+	d, err := call(RouteOptions{Candidates: candidates}, p.FullTimeout)
+	if err == nil || w.hardError(err) != nil || w.ctx.Err() != nil {
+		return d, err
+	}
+	tr.Error = err.Error()
+	tr.FallbackLevel = 1
+	return call(RouteOptions{Candidates: candidates, Model: p.FallbackModel}, p.FullTimeout)
 }
 
 // A saved model result resumes here, without another provider call or proposal
@@ -450,13 +616,11 @@ func (w *work) propose() error {
 func (w *work) decide() error {
 	d := w.r.Decision
 	primary := d.Scenarios[0]
-	if primary.Confidence < .75 || primary.ScenarioID == "SYS_UNCLEAR" {
-		if w.r.Attempts < 2 {
-			w.r.Phase = "retrieving"
-			return w.save("intent_uncertain", nil)
-		}
+	u := w.e.assess(*d, w.s, w.r.Output.Trace.Shortlist, w.r.Output.Trace.Path)
+	w.r.Output.Trace.Uncertainty = &u
+	if u.Verdict != "execute" || primary.ScenarioID == "SYS_UNCLEAR" {
 		if !w.r.LowCounted {
-			if primary.Confidence < .45 {
+			if u.Verdict == "handoff" {
 				w.s.LowConfidence++
 			} else {
 				w.s.LowConfidence = 0

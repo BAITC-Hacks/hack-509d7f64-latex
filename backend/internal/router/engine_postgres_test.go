@@ -209,8 +209,8 @@ func TestPostgresLockAcrossInstances(t *testing.T) {
 
 type stopAfterProposalModel struct{ fakeModel }
 
-func (m *stopAfterProposalModel) Route(ctx context.Context, in Input, s Session) (Decision, error) {
-	d, err := m.fakeModel.Route(ctx, in, s)
+func (m *stopAfterProposalModel) Route(ctx context.Context, in Input, s Session, opts RouteOptions) (Decision, error) {
+	d, err := m.fakeModel.Route(ctx, in, s, opts)
 	if err != nil {
 		return Decision{}, err
 	}

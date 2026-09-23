@@ -54,7 +54,7 @@ func main() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		start := time.Now()
-		d, err := m.Route(ctx, router.Input{SessionID: u.ID, RequestID: u.ID, Text: u.Text, Language: u.Lang}, router.Session{Language: "ru", Identity: router.Values{}})
+		d, err := m.Route(ctx, router.Input{SessionID: u.ID, RequestID: u.ID, Text: u.Text, Language: u.Lang}, router.Session{Language: "ru", Identity: router.Values{}}, router.RouteOptions{})
 		elapsed += time.Since(start)
 		cancel()
 		if err != nil {

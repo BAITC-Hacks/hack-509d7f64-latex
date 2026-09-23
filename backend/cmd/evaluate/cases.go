@@ -16,8 +16,9 @@ type turnCase struct {
 	Text     string
 	Lang     string
 	Expected []string
-	Type     string   // dev utterance type or probe category
-	Tags     []string // dialog tags, probe tags and turn tags
+	Slots    map[string]any // expected slots (dialogs only; informational)
+	Type     string         // dev utterance type or probe category
+	Tags     []string       // dialog tags, probe tags and turn tags
 	// RefIrreversible lists irreversible actions the reference bot turn right
 	// after this client turn executes (dialogs only).
 	RefIrreversible []string
@@ -80,10 +81,11 @@ func loadDialogs(path string, c *router.Catalog) ([]sessionCase, error) {
 			Title string   `json:"title"`
 			Tags  []string `json:"tags"`
 			Turns []struct {
-				Role      string   `json:"role"`
-				Text      string   `json:"text"`
-				Lang      string   `json:"lang"`
-				Scenarios []string `json:"scenarios"`
+				Role      string         `json:"role"`
+				Text      string         `json:"text"`
+				Lang      string         `json:"lang"`
+				Scenarios []string       `json:"scenarios"`
+				Slots     map[string]any `json:"slots"`
 				Actions   []struct {
 					Name string `json:"name"`
 					Mode string `json:"mode"`
@@ -101,7 +103,7 @@ func loadDialogs(path string, c *router.Catalog) ([]sessionCase, error) {
 			switch t.Role {
 			case "client":
 				n := len(sc.Turns) + 1
-				sc.Turns = append(sc.Turns, turnCase{ID: fmt.Sprintf("%s.%d", d.ID, n), Text: t.Text, Lang: t.Lang, Expected: t.Scenarios, Type: "dialog", Tags: d.Tags})
+				sc.Turns = append(sc.Turns, turnCase{ID: fmt.Sprintf("%s.%d", d.ID, n), Text: t.Text, Lang: t.Lang, Expected: t.Scenarios, Slots: t.Slots, Type: "dialog", Tags: d.Tags})
 			case "bot":
 				if len(sc.Turns) == 0 {
 					continue

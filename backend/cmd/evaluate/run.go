@@ -25,7 +25,9 @@ type row struct {
 	Type             string                  `json:"type,omitempty"`
 	Tags             []string                `json:"tags,omitempty"`
 	Expected         []string                `json:"expected"`
+	ExpectedSlots    map[string]any          `json:"expected_slots,omitempty"`
 	Got              []string                `json:"got"`
+	Slots            router.Values           `json:"slots,omitempty"`
 	Reason           string                  `json:"reason,omitempty"`
 	Confidence       float64                 `json:"confidence"`
 	Alternatives     []router.Candidate      `json:"alternatives"`
@@ -50,9 +52,10 @@ type row struct {
 }
 
 type actionRef struct {
-	Name  string `json:"name"`
-	Mode  string `json:"mode"`
-	Error string `json:"error,omitempty"`
+	Name   string        `json:"name"`
+	Mode   string        `json:"mode"`
+	Inputs router.Values `json:"inputs,omitempty"`
+	Error  string        `json:"error,omitempty"`
 }
 
 type runner struct {
@@ -109,7 +112,7 @@ func (r *runner) runSession(ctx context.Context, sc sessionCase) []row {
 		out, err := eng.Process(tctx, in)
 		wall := time.Since(start)
 		cancel()
-		rw := row{Mode: r.mode, Session: sc.ID, Turn: i + 1, ID: t.ID, Text: t.Text, Lang: t.Lang, Type: t.Type, Tags: t.Tags, Expected: nonNil(t.Expected), Got: []string{}, Alternatives: []router.Candidate{}, Actions: []actionRef{}, LatencyMS: map[string]int64{}, WallMS: wall.Milliseconds(), RefIrreversible: t.RefIrreversible}
+		rw := row{Mode: r.mode, Session: sc.ID, Turn: i + 1, ID: t.ID, Text: t.Text, Lang: t.Lang, Type: t.Type, Tags: t.Tags, Expected: nonNil(t.Expected), Got: []string{}, Alternatives: []router.Candidate{}, Actions: []actionRef{}, LatencyMS: map[string]int64{}, WallMS: wall.Milliseconds(), ExpectedSlots: t.Slots, RefIrreversible: t.RefIrreversible}
 		if err != nil {
 			rw.ProcessError = err.Error()
 			prev = nil
@@ -136,6 +139,7 @@ func fill(rw *row, out router.Output) {
 		rw.Reason = tr.Decision.Scenarios[0].Reason
 		rw.Confidence = tr.Decision.Scenarios[0].Confidence
 	}
+	rw.Slots = tr.Decision.Slots
 	rw.Alternatives = nonNil(tr.Decision.Alternatives)
 	rw.Shortlist = tr.Shortlist
 	rw.Path = tr.Path
@@ -149,7 +153,16 @@ func fill(rw *row, out router.Output) {
 	rw.FallbackLevel = tr.FallbackLevel
 	rw.ResponseSource = tr.ResponseSource
 	for _, a := range tr.Actions {
-		ref := actionRef{Name: a.Name, Mode: a.Mode}
+		ref := actionRef{Name: a.Name, Mode: a.Mode, Inputs: a.Inputs}
+		if _, ok := a.Inputs["context"]; ok {
+			// Handoff context repeats the whole history; keep the row small.
+			ref.Inputs = router.Values{}
+			for k, v := range a.Inputs {
+				if k != "context" {
+					ref.Inputs[k] = v
+				}
+			}
+		}
 		switch e := a.Result["error"].(type) {
 		case map[string]any:
 			ref.Error = fmt.Sprint(e["code"])

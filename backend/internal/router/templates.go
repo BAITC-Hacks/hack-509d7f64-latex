@@ -130,7 +130,7 @@ func spokenValue(key string, v any) (string, bool) {
 			return "", false
 		}
 		if slices.Contains(closingMasked, key) {
-			return maskValue(x), true
+			return maskTailValue(x), true
 		}
 		if d, ok := spokenDate(x); ok {
 			return d, true
@@ -166,7 +166,7 @@ func spokenDate(s string) (string, bool) {
 	return "", false
 }
 
-func maskValue(v string) string {
+func maskTailValue(v string) string {
 	if len(v) > 4 {
 		return "***" + v[len(v)-4:]
 	}

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"regexp"
 	"slices"
 	"sort"
@@ -27,6 +28,8 @@ type Engine struct {
 	Policy    Policy
 	MaxSteps  int
 	Timeout   time.Duration
+	// Operators configures human takeover notifications (OPERATOR_WEBHOOK_URL).
+	Operators OperatorHub
 }
 
 // Policy holds the turn loop's tunables. Defaults are starting points that
@@ -49,7 +52,7 @@ func DefaultPolicy() Policy {
 }
 
 func NewEngine(c *Catalog, m Model, repo Repository) *Engine {
-	return &Engine{Catalog: c, Store: repo, Model: m, Retriever: NewRetriever(c), Policy: DefaultPolicy(), MaxSteps: 24, Timeout: 60 * time.Second}
+	return &Engine{Catalog: c, Store: repo, Model: m, Retriever: NewRetriever(c), Policy: DefaultPolicy(), MaxSteps: 24, Timeout: 60 * time.Second, Operators: OperatorHub{WebhookURL: os.Getenv("OPERATOR_WEBHOOK_URL")}}
 }
 
 // workflowIDs lists the scenarios already in play, which every shortlist keeps.
@@ -111,6 +114,9 @@ func (e *Engine) retrievalClarification(lang string, shortlist []ScoredScenario)
 	return local(lang, "Правильно понимаю, ваш вопрос такой: «"+example+"»? Ответьте «да» или уточните.", "Дұрыс түсіндім бе, сұрағыңыз мынадай ма: «"+example+"»? «Иә» деңіз немесе нақтылаңыз."), true
 }
 func (e *Engine) ValidateInput(in Input) error {
+	if in.Operator != nil {
+		return fmt.Errorf("%w: operator actions use the operator API", ErrInvalidInput)
+	}
 	if !idPattern.MatchString(in.SessionID) || !idPattern.MatchString(in.RequestID) {
 		return fmt.Errorf("%w: invalid session_id or request_id", ErrInvalidInput)
 	}
@@ -234,6 +240,21 @@ func (e *Engine) Process(ctx context.Context, in Input) (Output, error) {
 			s.Language = in.Language
 		}
 		r.Output = Output{SessionID: s.ID, RequestID: in.RequestID, Language: s.Language, PendingScenarios: []string{}, Trace: Trace{Turn: s.TurnCount, Transcript: in.Text, Language: in.Language, Actions: []ActionCall{}, LatencyMS: map[string]int64{}}}
+		r.Output.OperatorMessages = takeOperatorMessages(&s)
+		if s.Operator == nil {
+			if note := takeHandback(&s); note != nil {
+				r.RoutingContext = append(r.RoutingContext, note)
+			}
+		}
+	}
+	if err := e.recordNotifications(lease, &s, &r); err != nil {
+		return Output{}, err
+	}
+	// While a human owns the conversation the bot stays silent: no routing,
+	// no tools, no model call. A run that itself opened the ticket (and was
+	// interrupted afterwards) is past "received" and finishes normally.
+	if r.Phase == "received" && s.Operator.Open() {
+		return e.hold(ctx, lease, &s, &r)
 	}
 	return e.run(ctx, lease, &s, &r)
 }
@@ -329,6 +350,7 @@ func (e *Engine) run(ctx context.Context, l Lease, s *Session, r *Run) (Output, 
 		}
 		if (ctx.Err() != nil || r.Steps >= e.MaxSteps) && r.Phase != "handoff" {
 			r.Output.Trace.Error = "processing budget exceeded"
+			r.Output.Trace.Handoff = &HandoffInfo{Reason: ReasonProcessingBudget, Detail: fmt.Sprintf("%d of %d steps, %d ms active", r.Steps, e.MaxSteps, r.ActiveMS), Status: "requested"}
 			r.Phase = "handoff"
 			r.Fallback = local(s.Language, "Для завершения запроса подключаю оператора.", "Сұрауды аяқтау үшін операторды қосамын.")
 		}
@@ -405,6 +427,15 @@ func (w *work) beforeModel(kind string) error {
 }
 func (w *work) afterModel() { w.r.InFlightAt = nil; w.account() }
 func (w *work) finish(answer, status string) error {
+	w.settle(answer, status)
+	ctx, cancel := w.dbContext()
+	defer cancel()
+	return w.l.Save(ctx, w.s, w.r, &Event{Kind: "turn_output", Data: Values{"status": status}})
+}
+
+// settle fills the final output without saving; a tool transaction or finish
+// commits it.
+func (w *work) settle(answer, status string) {
 	w.r.Phase = "finished"
 	if status == "awaiting_intent_confirmation" {
 		w.r.Phase = status
@@ -425,15 +456,15 @@ func (w *work) finish(answer, status string) error {
 	}
 	o.PendingScenarios = pendingIDs(w.s)
 	o.Review = clone(w.r.Review)
+	if w.s.Operator.Open() {
+		o.Handoff = w.s.Operator.info()
+	}
 	w.account()
 	for i := range w.r.Reviews {
 		if w.r.Reviews[i].Output == nil {
 			w.r.Reviews[i].Output = clone(o)
 		}
 	}
-	ctx, cancel := w.dbContext()
-	defer cancel()
-	return w.l.Save(ctx, w.s, w.r, &Event{Kind: "turn_output", Data: Values{"status": status}})
 }
 func (w *work) identify() error {
 	if w.r.Attempts >= 3 {
@@ -507,8 +538,7 @@ func (w *work) identify() error {
 		}
 		// L3: hand off with context.
 		tr.FallbackLevel = 3
-		w.r.Phase = "handoff"
-		return w.save("routing_failed", Values{"error": err.Error()})
+		return w.handoff(ReasonRoutingFailed, err.Error(), "", "routing_failed", Values{"error": err.Error()})
 	}
 	w.r.Decision = &d
 	w.r.Phase = "validating"
@@ -582,8 +612,7 @@ func (w *work) propose() error {
 	d := clone(*w.r.Decision)
 	if err := w.e.validateDecision(d); err != nil {
 		w.r.Output.Trace.Error = err.Error()
-		w.r.Phase = "handoff"
-		return w.save("routing_failed", Values{"error": err.Error()})
+		return w.handoff(ReasonInvalidDecision, err.Error(), "", "routing_failed", Values{"error": err.Error()})
 	}
 	if w.r.Input.ReplyLanguage != "" {
 		d.Language = w.r.Input.ReplyLanguage
@@ -628,8 +657,8 @@ func (w *work) decide() error {
 			w.r.LowCounted = true
 		}
 		if w.s.LowConfidence >= 2 {
-			w.r.Phase = "handoff"
-			return w.save("low_confidence_handoff", nil)
+			detail := fmt.Sprintf("uncertainty %.2f above %.2f on %d consecutive turns", u.Score, w.e.Policy.Handoff, w.s.LowConfidence)
+			return w.handoff(ReasonLowConfidence, detail, "", "low_confidence_handoff", Values{"uncertainty": u})
 		}
 		options := []string{}
 		for _, c := range append(append([]Candidate{}, d.Scenarios...), d.Alternatives...) {
@@ -653,8 +682,7 @@ func (w *work) decide() error {
 	}
 	for _, c := range d.Scenarios {
 		if c.ScenarioID == "SC37" && c.Confidence >= .75 {
-			w.r.Phase = "handoff"
-			return w.save("operator_requested", nil)
+			return w.handoff(ReasonOperatorRequested, "client asked for a human operator: "+c.Reason, "SC37", "operator_requested", nil)
 		}
 	}
 	if w.r.Input.ReviewMode != "auto" {

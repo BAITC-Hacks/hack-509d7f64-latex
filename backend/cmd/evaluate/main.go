@@ -127,7 +127,7 @@ func runModel(ctx context.Context, o options, catalog *router.Catalog) {
 	config := map[string]any{"model": model, "fast_model": fast, "fallback_model": p.FallbackModel, "concurrency": o.concurrency, "policy": map[string]any{"shortlist_size": p.ShortlistSize, "fast_candidates": p.FastCandidates, "fast_margin": p.FastMargin, "fast_min_score": p.FastMinScore, "execute": p.Execute, "handoff": p.Handoff, "l2_margin": p.L2Margin, "fast_timeout": p.FastTimeout.String(), "full_timeout": p.FullTimeout.String()}, "max_steps": engine.MaxSteps, "turn_budget": engine.Timeout.String(), "sessions": len(cases), "turns": turns}
 	fmt.Printf("evaluate mode=%s sessions=%d turns=%d model=%s fast=%s fallback=%s concurrency=%d\n", o.mode, len(cases), turns, model, fast, p.FallbackModel, o.concurrency)
 	fmt.Printf("policy: shortlist=%d fast_candidates=%d fast_margin=%.2f fast_min=%.2f exec<=%.2f handoff>%.2f fast_timeout=%s full_timeout=%s turn_budget=%s\n", p.ShortlistSize, p.FastCandidates, p.FastMargin, p.FastMinScore, p.Execute, p.Handoff, p.FastTimeout, p.FullTimeout, engine.Timeout)
-	r := &runner{base: *engine, catalog: catalog, mode: o.mode, timeout: o.turnTimeout}
+	r := &runner{base: engine, catalog: catalog, mode: o.mode, timeout: o.turnTimeout}
 	if !o.quiet {
 		r.progress = os.Stderr
 	}

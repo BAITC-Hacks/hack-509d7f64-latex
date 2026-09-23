@@ -59,7 +59,7 @@ type actionRef struct {
 }
 
 type runner struct {
-	base     router.Engine // Store is replaced per session
+	base     *router.Engine // template; each session gets its own Engine and Store
 	catalog  *router.Catalog
 	mode     string
 	timeout  time.Duration
@@ -100,8 +100,8 @@ func (r *runner) runAll(ctx context.Context, cases []sessionCase, concurrency in
 var unsafeID = regexp.MustCompile(`[^A-Za-z0-9_-]`)
 
 func (r *runner) runSession(ctx context.Context, sc sessionCase) []row {
-	eng := r.base
-	eng.Store = router.NewMemoryRepository(r.catalog)
+	b := r.base
+	eng := &router.Engine{Catalog: b.Catalog, Store: router.NewMemoryRepository(r.catalog), Model: b.Model, Retriever: b.Retriever, Policy: b.Policy, MaxSteps: b.MaxSteps, Timeout: b.Timeout}
 	sid := unsafeID.ReplaceAllString(r.mode+"-"+sc.ID, "_")
 	var prev *router.Output
 	rows := make([]row, 0, len(sc.Turns))

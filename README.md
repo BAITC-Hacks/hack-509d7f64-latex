@@ -190,9 +190,11 @@ an interrupted request resumes its checkpoint. Reusing an ID with different
 input returns HTTP 409.
 
 Responses include `answer`, `language`, `status`, `active_scenario`,
-`pending_scenarios`, and `trace`. The trace includes the routing decision,
-alternatives, explanation, actions/results, and layer-2 timing. It does not
-measure speech recognition or TTS latency.
+`pending_scenarios`, and `trace`, plus `handoff` and `operator_messages` when a
+human operator is involved (see [Operator handoff](#operator-handoff)). The
+trace includes the routing decision, alternatives, explanation, actions/results,
+layer-2 timing, and `trace.handoff` (reason code and ticket) on a handoff. It
+does not measure speech recognition or TTS latency.
 
 | Status | Client action |
 | --- | --- |
@@ -202,7 +204,8 @@ measure speech recognition or TTS latency.
 | `clarification` | Ask the returned clarification question. |
 | `completed` | Present the answer; queued topics remain available. |
 | `cancelled` | The user declined the proposed business operation. |
-| `handoff` | A synthetic operator handoff was recorded with context. |
+| `handoff` | The bot gave up: `handoff` has `ticket_id`, `queue`, `reason`, `status` (`waiting`, or `failed` when no operator could be reached). |
+| `with_operator` | A human owns the call; the bot did not answer. Speak `answer` (hold message while waiting, empty once connected) and every `operator_messages[].text`. |
 
 ## Intent review API
 
@@ -247,6 +250,78 @@ confirmation, such as `Да` or `Иә`, on a later user turn. Intent approval ca
 provide that consent. Corrections invalidate action previews, and each
 irreversible action is confirmed separately.
 
+## Operator handoff
+
+Every path on which the bot gives up opens the same operator ticket through
+the synthetic `transfer_to_operator` action. The reason code is in
+`output.handoff.reason`, `trace.handoff`, and the ticket:
+
+| Reason | Trigger |
+| --- | --- |
+| `operator_requested` | SC37 chosen with confidence ≥ 0.75 (the client asked for a person). |
+| `low_confidence` | Two consecutive turns with uncertainty verdict `handoff`. |
+| `routing_failed` | Fallback ladder bottomed out (L3): every model call failed and retrieval could not ask. |
+| `invalid_decision` | A stored model proposal failed catalog validation. |
+| `processing_budget` | 24 steps or 60 s of active processing exceeded. |
+| `tool_failed` | A tool failed twice, or stayed `service_unavailable` after one retry. |
+| `identification_failed` | The client was not found twice. |
+| `urgent_scenario` | SC11 with injured people or `needs_handoff`, SC15 or SC38 with `needs_handoff`. |
+| `scenario_handoff` | The scenario's own `handoff.when` rule, e.g. SC10 always, SC30 `charged_policy_not_issued`, `needs_handoff`. |
+
+The ticket's queue is the scenario's `handoff.queue` for scenario, urgent and
+tool/identification failures, otherwise `operator_general`. The ticket lives in
+the session JSON (`session.operator`, closed ones in `session.operator_history`)
+with status `waiting` → `connected` → `closed` and a context packet: the last
+ten turns, current input, active frame with slots, pending scenarios, identity,
+the last decision with alternatives, uncertainty components, routing path,
+shortlist, fallback level, error, and the last tool call. Supervisors see there
+where the bot doubted.
+
+While a ticket is open, user turns never reach the bot and make no model call.
+`POST /v1/turns` still applies idempotency and returns `status: with_operator`,
+the ticket in `handoff`, the client's words are appended to the ticket, and
+`operator_messages` carries operator messages not delivered in an earlier
+output. Operator actions are stored as ordinary turns (`operator_connected`,
+`operator_message`, `operator_closed`), so the dialog history, and the bot
+after a handback, contain them.
+
+Operator endpoints require `Authorization: Bearer <OPERATOR_API_TOKEN>`: a
+missing token returns 401, a user token 403, and 403 also when the server has
+no `OPERATOR_API_TOKEN`. Each action takes a fresh `request_id`: an identical
+retry returns the saved result, a changed payload 409, and a user turn still in
+progress 409 (busy).
+
+| Endpoint | Result |
+| --- | --- |
+| `GET /v1/operator/handoffs?queue=` | Open tickets, oldest first, with context packet and `client_turns` since the handoff. 501 when the store cannot list sessions. |
+| `GET /v1/operator/handoffs/{session_id}` | The open ticket (or the latest closed one) with context, conversation, and `recent_turns` with full traces. |
+| `POST /v1/operator/handoffs/{session_id}/claim` | `{"request_id":"op-1","operator":"Aigerim"}`: `waiting` → `connected`. |
+| `POST /v1/operator/handoffs/{session_id}/messages` | `{"request_id":"op-2","text":"..."}`: an operator message; the ticket must be connected. |
+| `POST /v1/operator/handoffs/{session_id}/close` | `{"request_id":"op-3","resolution":"...","return_to_bot":true}`: closes the ticket. |
+| `GET /v1/sessions/{session_id}/messages?after=N` | Layer 3 polling (user or operator token): operator and system lines with turn number > `N`, plus the current ticket summary and `last_turn`. |
+
+With `return_to_bot: true` the active workflow, stack and queue stay (stale
+previews and failure counters are reset) and the bot answers the next user
+turn, which also receives a routing note with the resolution. Without it the
+workflow is cleared and the close result's `answer` (and a `system` line in the
+message feed) is the bilingual closing notice.
+
+```json
+{"session_id":"call-001","request_id":"turn-007","answer":"","status":"with_operator",
+ "handoff":{"ticket_id":"HO-900001","queue":"claims_team","reason":"urgent_scenario","status":"connected"},
+ "operator_messages":[{"turn":6,"role":"operator","text":"Скорая уже едет.","operator":"Aigerim","request_id":"op-2","at":"2026-10-01T09:00:00Z"}],
+ "trace":{"turn":7,"path":"operator","...":"..."}}
+```
+
+Optional `OPERATOR_WEBHOOK_URL` notifies real people: after a handoff commits,
+the server POSTs `{"event":"handoff.created","session_id":...,"ticket":{...}}`
+with phone/IIN/e-mail values masked to their last four characters and an
+`Idempotency-Key: <ticket_id>` header, asynchronously with a 3 s timeout. No
+API key is sent. Failures are logged and recorded as `ticket.notification`
+(`pending`, `sent`, or `failed`) with an `operator_notification` event at the
+session's next write; they never delay or fail the turn. Unset means no
+notification.
+
 ## Other endpoints and failures
 
 | Endpoint | Result |
@@ -256,15 +331,17 @@ irreversible action is confirmed separately.
 | `GET /v1/scenarios` | Fixed scenario catalog and system intents. |
 | `GET /v1/sessions/{id}` | Current workflow and the last ten finished turns; older turns remain stored. |
 | `GET /v1/sessions/{id}/turns/{request_id}` | `{ "phase": "...", "output": { ... } }` from the latest committed checkpoint. |
+| `GET /v1/sessions/{id}/messages?after=N` | Operator messages for layer 3; see [Operator handoff](#operator-handoff). |
 
 The internal terminal turn phase is `finished`; `output.status` explains its
 user-facing outcome. Other phases include `received`, `identifying`,
 `retrieving`, `awaiting_intent_confirmation`, and `generating_answer`.
 An incomplete checkpoint may have no final answer yet.
 
-HTTP 400 means invalid input or JSON, 401 invalid credentials, 404 missing state,
-409 a conflicting/stale request or busy session, and 503 unavailable persistence
-or interrupted processing. Retry transient failures using the same IDs. Stored
+HTTP 400 means invalid input or JSON, 401 invalid credentials, 403 credentials
+without operator rights, 404 missing state, 409 a conflicting/stale request or
+busy session, 501 a store feature that is not available, and 503 unavailable
+persistence or interrupted processing. Retry transient failures using the same IDs. Stored
 events preserve model decisions, retrieval, review outcomes, tool operations,
 and workflow progression for diagnosis.
 

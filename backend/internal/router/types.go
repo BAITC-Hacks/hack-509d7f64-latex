@@ -17,6 +17,9 @@ type Input struct {
 	ReplyLanguage string `json:"reply_language,omitempty"`
 	Slots         Values `json:"slots,omitempty"`
 	ReviewMode    string `json:"review_mode,omitempty"`
+	// Operator is set only on runs created by the operator API (claim, message,
+	// close). Layer 1 must never send it; ValidateInput rejects it.
+	Operator *OperatorAction `json:"operator,omitempty"`
 }
 type Candidate struct {
 	ScenarioID string  `json:"scenario_id"`
@@ -54,6 +57,9 @@ type Trace struct {
 	Uncertainty    *Uncertainty     `json:"uncertainty,omitempty"`
 	FallbackLevel  int              `json:"fallback_level"`
 	ResponseSource string           `json:"response_source,omitempty"`
+	// Handoff records why this turn gave up and which ticket it opened (or,
+	// on a with_operator turn, which ticket holds the conversation).
+	Handoff *HandoffInfo `json:"handoff,omitempty"`
 }
 
 // ScoredScenario is one retrieval candidate. Retrieval only narrows the
@@ -90,6 +96,12 @@ type Output struct {
 	PendingScenarios []string      `json:"pending_scenarios"`
 	Trace            Trace         `json:"trace"`
 	Review           *IntentReview `json:"review,omitempty"`
+	// Handoff is present while a human operator owns the conversation, on the
+	// turn that opened the ticket, and on operator action results.
+	Handoff *HandoffInfo `json:"handoff,omitempty"`
+	// OperatorMessages are operator-authored messages not delivered in any
+	// earlier turn output; layer 3 speaks them.
+	OperatorMessages []OperatorEntry `json:"operator_messages,omitempty"`
 }
 type Pending struct {
 	Action string `json:"action"`
@@ -125,6 +137,11 @@ type Session struct {
 	PendingTurnID  string                    `json:"pending_turn_id,omitempty"`
 	RoutingContext []Values                  `json:"routing_context,omitempty"`
 	ReviewReplies  map[string]UserReviewLink `json:"review_replies,omitempty"`
+	// Operator is the open (waiting/connected) human takeover, if any. While it
+	// is open, user turns never reach the bot. Closed tickets move to
+	// OperatorHistory. Both live in the session JSON, so every store keeps them.
+	Operator        *OperatorHandoff  `json:"operator,omitempty"`
+	OperatorHistory []OperatorHandoff `json:"operator_history,omitempty"`
 }
 type UserReviewLink struct {
 	TurnRequestID string `json:"turn_request_id"`

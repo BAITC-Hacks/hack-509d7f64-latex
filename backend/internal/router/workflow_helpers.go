@@ -107,24 +107,26 @@ func (e *Engine) question(s *Session, f *Frame, key string) string {
 	}
 	return local(s.Language, "Уточните данные для продолжения или попросите оператора.", "Жалғастыру үшін деректерді нақтылаңыз немесе операторды сұраңыз.")
 }
-func (e *Engine) shouldHandoff(sc Scenario, d Decision, f *Frame) bool {
+
+// shouldHandoff reports whether the scenario's handoff rule applies, and why.
+func (e *Engine) shouldHandoff(sc Scenario, d Decision, f *Frame) (bool, string) {
 	if sc.Handoff == nil {
-		return false
+		return false, ""
 	}
 	if strings.HasPrefix(sc.Handoff.When, "always") {
-		return true
+		return true, sc.Handoff.When
 	}
 	if d.NeedsHandoff {
-		return true
+		return true, "needs_handoff (" + sc.Handoff.When + ")"
 	}
 	if sc.ID == "SC30" {
 		for _, r := range f.Results {
 			if r.Result["payment_status"] == "charged_policy_not_issued" {
-				return true
+				return true, "payment charged_policy_not_issued"
 			}
 		}
 	}
-	return false
+	return false, ""
 }
 func (e *Engine) arguments(s *Session, f *Frame, sc Scenario, name string) Values {
 	a := clone(f.Slots)
@@ -162,10 +164,6 @@ func (e *Engine) arguments(s *Session, f *Frame, sc Scenario, name string) Value
 			topic = "all"
 		}
 		a["topic"] = topic
-	}
-	if name == "transfer_to_operator" {
-		a["queue"] = sc.Handoff.Queue
-		a["context"] = Values{"session_id": s.ID, "active": compactFrame(f), "pending_scenarios": pendingIDs(s), "language": s.Language, "history": history(s.Turns)}
 	}
 	return a
 }

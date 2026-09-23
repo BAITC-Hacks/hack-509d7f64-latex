@@ -69,7 +69,11 @@ func (w *work) prepare() error {
 	w.r.FrameReady = true
 	w.r.Phase = "executing"
 	if sc.Priority == "urgent" && sc.Handoff != nil && ((sc.ID == "SC11" && (f.Slots["injured"] == true || d.NeedsHandoff)) || (sc.ID == "SC15" && d.NeedsHandoff) || (sc.ID == "SC38" && d.NeedsHandoff)) {
-		w.r.Phase = "handoff"
+		detail := sc.ID + ": needs_handoff (" + sc.Handoff.When + ")"
+		if sc.ID == "SC11" && f.Slots["injured"] == true {
+			detail = sc.ID + ": injured"
+		}
+		return w.handoff(ReasonUrgentScenario, detail, sc.ID, "workflow_prepared", Values{"scenario_id": sc.ID})
 	}
 	return w.save("workflow_prepared", Values{"scenario_id": sc.ID})
 }
@@ -149,7 +153,18 @@ func (w *work) execute() error {
 		return w.queueAnswer(Values{"purpose": "answer from executed actions", "scenario": sc, "slots": f.Slots, "actions": f.Results, "utterance": w.r.Input.Text, "pending_scenarios": pendingIDs(w.s)}, local(w.s.Language, "Запрос обработан; результаты сохранены.", "Сұрау өңделді; нәтижелер сақталды."), "completed", true)
 	}
 	name := sc.Actions[f.NextAction]
-	if (name == "find_client" && has(w.s.Identity, "client_id")) || (name == "send_sms" && !has(f.Slots, "phone")) || (name == "transfer_to_operator" && !w.e.shouldHandoff(sc, *w.r.Decision, f)) {
+	if name == "transfer_to_operator" {
+		// The scenario's own handoff rule goes through the common handoff so
+		// it opens the same operator ticket as every other trigger.
+		if ok, detail := w.e.shouldHandoff(sc, *w.r.Decision, f); ok {
+			reason := ReasonScenarioHandoff
+			if sc.ID == "SC37" {
+				reason = ReasonOperatorRequested
+			}
+			return w.handoff(reason, sc.ID+": "+detail, sc.ID, "scenario_handoff", Values{"scenario_id": sc.ID})
+		}
+	}
+	if (name == "find_client" && has(w.s.Identity, "client_id")) || (name == "send_sms" && !has(f.Slots, "phone")) || name == "transfer_to_operator" {
 		f.NextAction++
 		return w.save("action_skipped", Values{"name": name})
 	}
@@ -208,12 +223,6 @@ func (w *work) execute() error {
 		f.Pending = nil
 		w.r.ActionApproved = false
 		w.r.Phase = "executing"
-		if name == "transfer_to_operator" {
-			w.r.FinalStatus = "handoff"
-			w.r.Fallback = local(w.s.Language, "Передаю разговор профильному оператору с контекстом.", "Әңгімені мәліметтерімен бірге тиісті операторға беремін.")
-			w.r.AnswerFacts = Values{"purpose": "confirm handoff", "action": w.r.LastTool}
-			w.r.Phase = "generating_answer"
-		}
 	})
 }
 func (w *work) toolError() error {
@@ -222,8 +231,7 @@ func (w *work) toolError() error {
 	code := errorCode(call.Result)
 	if call.Name == "find_client" && !has(w.s.Identity, "client_id") {
 		if f.Failures["identify"] >= 2 {
-			w.r.Phase = "handoff"
-			return w.save("identification_failed", nil)
+			return w.handoff(ReasonIdentificationFailed, fmt.Sprintf("find_client failed %d times: %s", f.Failures["identify"], code), "", "identification_failed", nil)
 		}
 		return w.ask(f, local(w.s.Language, "Клиент не найден. Назовите ИИН или проверьте номер телефона.", "Клиент табылмады. ЖСН-ді айтыңыз немесе телефон нөмірін тексеріңіз."), "phone", "iin")
 	}
@@ -233,8 +241,8 @@ func (w *work) toolError() error {
 		return w.save("tool_retry", nil)
 	}
 	if f.Failures[call.Name] >= 2 || code == "service_unavailable" {
-		w.r.Phase = "handoff"
-		return w.save("tool_failed", nil)
+		detail := fmt.Sprintf("%s failed %d times: %s", call.Name, f.Failures[call.Name], code)
+		return w.handoff(ReasonToolFailed, detail, "", "tool_failed", Values{"name": call.Name, "code": code})
 	}
 	if code == "not_found" {
 		for _, key := range []string{"policy_number", "claim_number", "vehicle_plate"} {
@@ -292,35 +300,5 @@ func (w *work) generate() error {
 	}
 	return w.finish(answer, w.r.FinalStatus)
 }
-func (w *work) transfer() error {
-	queue := "operator_general"
-	if w.s.Active != nil {
-		sc := w.e.Catalog.Scenarios[w.s.Active.ScenarioID]
-		if sc.Priority == "urgent" && sc.Handoff != nil {
-			queue = sc.Handoff.Queue
-		}
-	}
-	args := Values{"queue": queue, "context": Values{"session_id": w.s.ID, "language": w.s.Language, "active": compactFrame(w.s.Active), "pending_scenarios": pendingIDs(w.s), "history": history(w.s.Turns), "current_input": w.r.Input, "proposals": w.r.Output.Trace.Proposals}}
-	err := w.tool("transfer_to_operator", args, func(result Values) {
-		if w.s.Active != nil {
-			w.s.Active.Pending = nil
-		}
-		w.s.PendingTurnID = ""
-		w.r.Output.Status = "handoff"
-		w.r.Output.Answer = local(w.s.Language, "Передаю запрос оператору вместе с контекстом.", "Сұрауды мәліметтерімен бірге операторға беремін.")
-		w.r.Output.Language = w.s.Language
-		w.r.Output.PendingScenarios = pendingIDs(w.s)
-		w.r.Output.Review = clone(w.r.Review)
-		w.r.Phase = "finished"
-		if errorCode(result) != "" {
-			w.r.Output.Answer = local(w.s.Language, "Не удалось подключить оператора. Пожалуйста, повторите запрос позже.", "Операторға қосылу мүмкін болмады. Кейін қайталап көріңіз.")
-			w.r.Output.Trace.Error = "handoff failed"
-		}
-		for i := range w.r.Reviews {
-			if w.r.Reviews[i].Output == nil {
-				w.r.Reviews[i].Output = clone(&w.r.Output)
-			}
-		}
-	})
-	return err
-}
+
+// transfer (the single handoff executor) lives in operator.go.

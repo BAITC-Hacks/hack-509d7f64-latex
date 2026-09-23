@@ -101,6 +101,15 @@ func TestPreRouterSlotParsers(t *testing.T) {
 		{"preferred_date", "бүрсігүні", "2026-10-03"},
 		{"incident_date", "вчера", "2026-09-30"},
 		{"payment_date", "кеше", "2026-09-30"},
+		// A yearless date is the nearest one on the slot's side of today.
+		{"incident_date", "15.12", "2025-12-15"},
+		{"incident_date", "15 декабря", "2025-12-15"},
+		{"incident_date", "01.10", "2026-10-01"},
+		{"payment_date", "20.09", "2026-09-20"},
+		{"incident_date", "15.12.2026", "2026-12-15"},
+		{"trip_start", "15.01", "2027-01-15"},
+		{"trip_end", "5 қаңтар", "2027-01-05"},
+		{"preferred_date", "01.10", "2026-10-01"},
 		{"injured", "есть пострадавшие", true},
 		{"injured", "все целы", false},
 		{"injured", "барлығы аман", false},
@@ -166,6 +175,9 @@ func TestPreRouterSlotParsers(t *testing.T) {
 		{"trip_start", "завтра утром"},
 		{"trip_start", "с 15.10"},
 		{"trip_start", "15 чего-то"},
+		{"trip_start", "15.10.0000"},
+		{"incident_date", "0000-10-15"},
+		{"incident_date", "15 октября 0000 года"},
 		// "Все целы? Есть пострадавшие?": a bare yes/no answers either question.
 		{"injured", "да"},
 		{"injured", "нет"},
@@ -303,6 +315,12 @@ func TestPreRouterWitnesses(t *testing.T) {
 		"iin with a preamble": func() (*Session, string) {
 			return awaitingSession("SC25", "awaiting_slot", "phone", "iin"), "мой ИИН 910512300456, а ещё…"
 		},
+		"model flagged a handoff": func() (*Session, string) {
+			s := awaitingSession("SC13", "awaiting_confirmation")
+			s.Active.Pending = &Pending{Action: "create_claim"}
+			s.Turns[0].Output.Trace.Decision = Decision{Scenarios: []Candidate{{ScenarioID: "SC13", Confidence: .95}}, NeedsHandoff: true}
+			return s, "Да"
+		},
 	}
 	for name, build := range negatives {
 		s, text := build()
@@ -405,6 +423,37 @@ func TestPreRouterLeavesQualifiedYesToModel(t *testing.T) {
 	process(t, e, input("one", "Поменяйте почту"))
 	o := process(t, e, input("two", "да, но телефон другой"))
 	if m.calls != 2 || o.Trace.Path == "bypass" || actionExecuted(o, "update_contact") {
+		t.Fatalf("calls=%d %+v", m.calls, o)
+	}
+}
+
+// The model alone flags a handoff, and transfer_to_operator reads the flag from
+// the current turn's decision; a bare "Да" to the claim preview must not drop it.
+func TestPreRouterKeepsModelHandoff(t *testing.T) {
+	d := decision("SC13", Values{"phone": "+77010000001", "incident_date": "2026-09-30", "incident_description": "Угнали машину со двора"})
+	d.NeedsHandoff = true
+	yes := decision("SC13", Values{})
+	yes.NeedsHandoff = true
+	e, m := setup(t, d, yes)
+	if o := process(t, e, input("one", "Угнали машину со двора")); o.Status != "awaiting_confirmation" {
+		t.Fatalf("%+v", o)
+	}
+	o := process(t, e, input("two", "Да"))
+	if m.calls != 2 || o.Trace.Path == "bypass" || o.Status != "handoff" || !actionExecuted(o, "create_claim") || !actionExecuted(o, "transfer_to_operator") {
+		t.Fatalf("calls=%d %+v", m.calls, o)
+	}
+}
+
+// With the model routing, a bare "Нет" still cancels the preview.
+func TestPreRouterModelPathNoCancels(t *testing.T) {
+	d := decision("SC13", Values{"phone": "+77010000001", "incident_date": "2026-09-30", "incident_description": "Угнали машину со двора"})
+	d.NeedsHandoff = true
+	no := decision("SC13", Values{})
+	no.NeedsHandoff = true
+	e, m := setup(t, d, no)
+	process(t, e, input("one", "Угнали машину со двора"))
+	o := process(t, e, input("two", "Нет"))
+	if m.calls != 2 || o.Trace.Path == "bypass" || o.Status != "cancelled" || actionExecuted(o, "create_claim") || actionExecuted(o, "transfer_to_operator") {
 		t.Fatalf("calls=%d %+v", m.calls, o)
 	}
 }

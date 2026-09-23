@@ -157,14 +157,15 @@ func TestTopicSwitchAndReturnPreserveSlots(t *testing.T) {
 	}
 }
 func TestQuoteToPurchaseCarriesParameters(t *testing.T) {
-	e, _ := setup(t, decision("SC01", Values{"region": "almaty", "vehicle_type": "car", "drivers_iin": []any{"850314300121"}}), decision("SC02", Values{"phone": "+77010000001", "vehicle_plate": "777ABC02"}), decision("SC02", Values{}))
+	e, m := setup(t, decision("SC01", Values{"region": "almaty", "vehicle_type": "car", "drivers_iin": []any{"850314300121"}}), decision("SC02", Values{"phone": "+77010000001", "vehicle_plate": "777ABC02"}))
 	process(t, e, input("one", "Цена ОГПО"))
 	o := process(t, e, input("two", "Давайте оформим"))
 	if o.Status != "awaiting_confirmation" {
 		t.Fatalf("quote context lost: %+v", o)
 	}
+	// A bare yes to the preview continues without a model call.
 	o = process(t, e, input("three", "Да"))
-	if !actionExecuted(o, "create_policy") || !actionExecuted(o, "send_sms") {
+	if m.calls != 2 || o.Trace.Path != "bypass" || !actionExecuted(o, "create_policy") || !actionExecuted(o, "send_sms") {
 		t.Fatalf("purchase not completed: %+v", o)
 	}
 }
@@ -224,10 +225,10 @@ func TestNoConfirmationOnFirstTurn(t *testing.T) {
 	}
 }
 func TestNegativeConfirmationCancels(t *testing.T) {
-	e, _ := setup(t, decision("SC29", Values{"phone": "+77010000003", "contact_field": "email", "new_value": "new@mail.example"}), decision("SC29", Values{}))
+	e, m := setup(t, decision("SC29", Values{"phone": "+77010000003", "contact_field": "email", "new_value": "new@mail.example"}))
 	process(t, e, input("one", "Поменяйте почту"))
 	o := process(t, e, input("two", "Нет"))
-	if o.Status != "cancelled" || actionExecuted(o, "update_contact") {
+	if m.calls != 1 || o.Trace.Path != "bypass" || o.Status != "cancelled" || actionExecuted(o, "update_contact") {
 		t.Fatal(o)
 	}
 }

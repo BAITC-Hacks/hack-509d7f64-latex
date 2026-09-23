@@ -23,6 +23,12 @@ func (e *Engine) preRoute(s *Session, in Input) (Decision, bool) {
 	if last == nil || last.ActiveScenario != f.ScenarioID {
 		return Decision{}, false
 	}
+	// Only the model sets needs_handoff, and the transfer after an irreversible
+	// step (SC13, SC14, SC19) reads it from the current turn's decision, so once
+	// the model flagged a handoff it keeps routing rather than the flag dropping.
+	if last.Trace.Decision.NeedsHandoff {
+		return Decision{}, false
+	}
 	d := Decision{Alternatives: []Candidate{}, Language: preLanguage(s, in), Slots: Values{}, IsContinuation: true}
 	reason := ""
 	confirming := last.Status == "awaiting_confirmation" && f.Pending != nil
@@ -114,7 +120,7 @@ func (r slotReader) parse(name, t string) (any, bool) {
 	case "enum":
 		v = r.enum(name, slot, t)
 	case "date":
-		if x, ok := r.date(t); ok {
+		if x, ok := r.date(name, t); ok {
 			v = x
 		}
 	case "boolean":
@@ -376,32 +382,49 @@ var preMonths = map[string]time.Month{
 	"қаңтар": 1, "ақпан": 2, "наурыз": 3, "сәуір": 4, "мамыр": 5, "маусым": 6, "шілде": 7, "тамыз": 8, "қыркүйек": 9, "қазан": 10, "қараша": 11, "желтоқсан": 12,
 }
 
+// preDateSide says which side of today a slot's dates fall on: events already
+// happened, trips and appointments are ahead.
+var preDateSide = map[string]int{"incident_date": -1, "payment_date": -1, "trip_start": 1, "trip_end": 1, "preferred_date": 1}
+
 // date reads dd.mm[.yyyy], yyyy-mm-dd, "15 октября [2026]" and relative days
-// against the dataset's today; a missing year is today's year.
-func (r slotReader) date(t string) (string, bool) {
+// against the dataset's today. A missing year is the nearest one on the slot's
+// side of today: "15.12" said on 2026-10-01 is 2025-12-15 for an incident.
+func (r slotReader) date(name, t string) (string, bool) {
 	today := r.catalog.Today
 	if n, ok := preRelativeDays[t]; ok {
 		return today.AddDate(0, 0, n).Format(time.DateOnly), true
 	}
-	if d, err := time.Parse(time.DateOnly, t); err == nil {
-		return d.Format(time.DateOnly), true
-	}
 	var day, year int
 	var month time.Month
-	if m := preDMY.FindStringSubmatch(t); m != nil {
+	yearless := false
+	if d, err := time.Parse(time.DateOnly, t); err == nil {
+		day, month, year = d.Day(), d.Month(), d.Year()
+	} else if m := preDMY.FindStringSubmatch(t); m != nil {
 		day, _ = strconv.Atoi(m[1])
 		n, _ := strconv.Atoi(m[2])
 		month = time.Month(n)
 		year, _ = strconv.Atoi(m[4])
+		yearless = m[4] == ""
 	} else if m := preDayMonth.FindStringSubmatch(t); m != nil && preMonths[m[2]] != 0 {
 		day, _ = strconv.Atoi(m[1])
 		month = preMonths[m[2]]
 		year, _ = strconv.Atoi(m[4])
+		yearless = m[4] == ""
 	} else {
 		return "", false
 	}
-	if year == 0 {
+	if yearless {
 		year = today.Year()
+		guess := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+		if side := preDateSide[name]; side < 0 && guess.After(today) {
+			year--
+		} else if side > 0 && guess.Before(today) {
+			year++
+		}
+	}
+	// "15.10.0000" is a misheard year, not a date to confirm.
+	if year < 1900 || year > 2100 {
+		return "", false
 	}
 	d := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
 	if d.Day() != day || d.Month() != month {

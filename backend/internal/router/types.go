@@ -16,6 +16,7 @@ type Input struct {
 	Language      string `json:"language"`
 	ReplyLanguage string `json:"reply_language,omitempty"`
 	Slots         Values `json:"slots,omitempty"`
+	ReviewMode    string `json:"review_mode,omitempty"`
 }
 type Candidate struct {
 	ScenarioID string  `json:"scenario_id"`
@@ -54,6 +55,7 @@ type Output struct {
 	ActiveScenario   string   `json:"active_scenario,omitempty"`
 	PendingScenarios []string `json:"pending_scenarios"`
 	Trace            Trace    `json:"trace"`
+	Review           *IntentReview `json:"review,omitempty"`
 }
 type Pending struct {
 	Action string `json:"action"`
@@ -82,6 +84,10 @@ type Session struct {
 	Turns         []Turn    `json:"turns"`
 	LowConfidence int       `json:"low_confidence"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	Version       int64 `json:"version"`
+	TurnCount     int `json:"turn_count"`
+	PendingTurnID string `json:"pending_turn_id,omitempty"`
+	RoutingContext []Values `json:"routing_context,omitempty"`
 }
 type Model interface {
 	Route(context.Context, Input, Session) (Decision, error)

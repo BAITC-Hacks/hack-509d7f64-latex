@@ -4,7 +4,10 @@ ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 curl build-essential && rm -rf /var/lib/apt/lists/*
 WORKDIR /app/tts
 COPY tts/requirements.txt .
-RUN pip install --no-cache-dir torch --index-url ${TORCH_INDEX} \
+# torch and torchaudio must come from the same index and version: espnet pulls torchaudio, and the PyPI
+# wheel is a CUDA 13 build that fails to load (libcudart.so.13) next to a CPU torch.
+ARG TORCH_VERSION=2.11.0
+RUN pip install --no-cache-dir torch==${TORCH_VERSION} torchaudio==${TORCH_VERSION} --index-url ${TORCH_INDEX} \
  && pip install --no-cache-dir -r requirements.txt \
  && pip install --no-cache-dir --no-build-isolation parallel_wavegan
 # bake the Silero Russian model (87 MB) into the image; Kazakh models go to the /models volume on first start

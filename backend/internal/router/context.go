@@ -49,11 +49,23 @@ func routingMessages(in Input, state Session) ([]any, error) {
 		return nil, err
 	}
 	for _, event := range state.RoutingContext {
-		if err := appendData(Values{"kind": "routing_event", "event": event}); err != nil {
+		if err := appendData(Values{"kind": "routing_event", "event": compactRoutingEvent(event)}); err != nil {
 			return nil, err
 		}
 	}
 	return messages, nil
+}
+
+func compactRoutingEvent(event Values) Values {
+	out := clone(event)
+	// Native provider items are retained for the in-flight tool round trip and
+	// durable trace. A rebuilt context only needs the human-readable retrieval
+	// result, not opaque reasoning or another JSON-string copy of that result.
+	for _, data := range []Values{out, asMap(out["data"])} {
+		delete(data, "provider_output")
+		delete(data, "tool_output")
+	}
+	return out
 }
 
 // Do not recursively resend supervisor traces and handoff payloads to the LLM.
@@ -81,9 +93,8 @@ func compactFrame(f *Frame) any {
 }
 func modelState(s Session) Session {
 	out := clone(s)
-	if len(out.Turns) > 10 {
-		out.Turns = out.Turns[len(out.Turns)-10:]
-	}
+	// routingMessages applies the ten-completed-turn bound after removing the
+	// active request; truncating here could evict an extra completed turn.
 	for i := range out.Turns {
 		if o := out.Turns[i].Output; o != nil {
 			o.Trace.Actions = nil

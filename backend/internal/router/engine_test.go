@@ -46,7 +46,7 @@ func setup(t *testing.T, ds ...Decision) (*Engine, *fakeModel) {
 		t.Fatal(err)
 	}
 	m := &fakeModel{decisions: ds}
-	return NewEngine(c, m), m
+	return NewEngine(c, m, testRepo(t, c)), m
 }
 func input(id, text string) Input {
 	return Input{SessionID: "call-1", RequestID: id, Text: text, Language: "ru"}
@@ -60,8 +60,8 @@ func process(t *testing.T, e *Engine, in Input) Output {
 	if o.Answer == "" {
 		t.Fatal("missing final answer")
 	}
-	s, ok := e.Store.Get(context.Background(), in.SessionID)
-	if !ok || s.Turns[len(s.Turns)-1].Output == nil {
+	r, err := e.Store.GetTurn(context.Background(), in.SessionID, o.RequestID)
+	if err != nil || r.Output.Answer == "" {
 		t.Fatal("answer not committed before return")
 	}
 	return o
@@ -109,7 +109,7 @@ func TestConfirmationAndRetryDoNotRepeatMutation(t *testing.T) {
 	if m.calls != 2 {
 		t.Fatal("retry called model")
 	}
-	c := e.Backend.Execute("find_client", Values{"phone": "+77010000003"}, "")
+	c := e.Store.(*memoryTestRepo).backend.Execute("find_client", Values{"phone": "+77010000003"}, "")
 	if c["email"] != "new@mail.example" {
 		t.Fatal("mutation not stored")
 	}
@@ -169,7 +169,7 @@ func TestQuoteToPurchaseCarriesParameters(t *testing.T) {
 func TestUrgentFirstAndMultiIntentQueue(t *testing.T) {
 	d := decision("SC33", Values{"city": "Almaty", "fraud_details": "Asked for SMS code"})
 	d.Scenarios = append(d.Scenarios, Candidate{ScenarioID: "SC38", Confidence: .99, Reason: "fraud"})
-	e, _ := setup(t, d)
+	e, _ := setup(t, d, d)
 	o := process(t, e, input("one", "Офис, и мне звонили мошенники"))
 	if o.Trace.Decision.Scenarios[0].ScenarioID != "SC38" || !actionExecuted(o, "report_fraud") {
 		t.Fatal("urgent scenario did not execute first")
@@ -181,7 +181,7 @@ func TestUrgentFirstAndMultiIntentQueue(t *testing.T) {
 func TestLowConfidenceTwiceHandsOff(t *testing.T) {
 	d := decision("SC25", Values{})
 	d.Scenarios[0].Confidence = .3
-	e, _ := setup(t, d, d)
+	e, _ := setup(t, d, d, d, d)
 	if o := process(t, e, input("one", "ну там")); o.Status != "clarification" {
 		t.Fatal(o.Status)
 	}
@@ -193,9 +193,9 @@ func TestLowConfidenceTwiceHandsOff(t *testing.T) {
 func TestMediumConfidenceNeverExecutesTools(t *testing.T) {
 	d := decision("SC29", Values{})
 	d.Scenarios[0].Confidence = .6
-	e, _ := setup(t, d)
+	e, _ := setup(t, d, d)
 	o := process(t, e, input("one", "Изменить что-то"))
-	if o.Status != "clarification" || len(o.Trace.Actions) != 0 {
+	if o.Status != "clarification" || actionExecuted(o, "update_contact") {
 		t.Fatal(o)
 	}
 }
@@ -231,7 +231,7 @@ func TestNegativeConfirmationCancels(t *testing.T) {
 }
 func TestIdentificationFailureReasksThenHandoff(t *testing.T) {
 	d := decision("SC25", Values{"phone": "+77010000099"})
-	e, _ := setup(t, d, d)
+	e, _ := setup(t, d, d, d, d)
 	if o := process(t, e, input("one", "мой полис")); o.Status != "awaiting_slot" {
 		t.Fatal(o)
 	}
@@ -249,7 +249,7 @@ func TestKnownPhoneInfersSinglePolicy(t *testing.T) {
 func TestKazakhMixedAndSlotValidation(t *testing.T) {
 	d := decision("SC33", Values{})
 	d.Language = "kk"
-	e, _ := setup(t, d)
+	e, _ := setup(t, d, d)
 	in := input("one", "Адрес қайда?")
 	in.Language = "mixed"
 	o := process(t, e, in)
@@ -284,7 +284,7 @@ func (m *concurrentModel) Respond(context.Context, string, Values) (string, erro
 func TestConcurrentDuplicateRunsOnce(t *testing.T) {
 	c, _ := LoadCatalog()
 	m := &concurrentModel{}
-	e := NewEngine(c, m)
+	e := NewEngine(c, m, testRepo(t, c))
 	var wg sync.WaitGroup
 	errs := make(chan error, 12)
 	for i := 0; i < 12; i++ {
@@ -309,7 +309,7 @@ func TestConcurrentDuplicateRunsOnce(t *testing.T) {
 func TestSeparateSessionsAreIsolated(t *testing.T) {
 	c, _ := LoadCatalog()
 	m := &concurrentModel{}
-	e := NewEngine(c, m)
+	e := NewEngine(c, m, testRepo(t, c))
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(1)

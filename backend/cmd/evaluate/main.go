@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	input := flag.String("input", "voice_router_dataset/dev_utterances.json", "development utterances")
+	input := flag.String("input", "../voice_router_dataset/dev_utterances.json", "development utterances")
 	output := flag.String("output", "predictions.json", "reference scorer output")
 	limit := flag.Int("limit", 0, "maximum utterances (0 = all)")
 	flag.Parse()

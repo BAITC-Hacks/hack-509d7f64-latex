@@ -29,11 +29,23 @@ const (
 	// boundaryConfidence is the alternative confidence at which the model itself
 	// treats a boundary neighbour as live.
 	boundaryConfidence = .5
+	// queueConfidence mirrors the engine's bar for queueing a secondary intent
+	// (workflow_helpers.go): a secondary below it is dropped, so it counts as
+	// an alternative, not as a choice that settles a disagreement or boundary.
+	queueConfidence = .75
 )
+
+// followUps are the scenarios a completed one hands the dialog to on the next
+// turn: only the quote's closing ("Оформим?") continues in another scenario.
+// not_this_if lists confusable neighbours, not follow-ups.
+var followUps = map[string][]string{"SC01": {"SC02"}}
 
 // assess turns a validated routing decision into an execute / clarify /
 // handoff verdict from observable signals: the model's confidence, the
-// retrieval shortlist and the dataset's not_this_if boundaries.
+// retrieval shortlist and the dataset's not_this_if boundaries. A continuation
+// of a scenario in play skips retrieval_margin and disagreement but keeps the
+// boundary check, shortlist included: a neighbour ranked top-2 by the reply
+// means the client may have switched topics.
 func (e *Engine) assess(d Decision, s *Session, shortlist []ScoredScenario, path string) Uncertainty {
 	if path == "bypass" {
 		return Uncertainty{Components: map[string]float64{"bypass": 0}, Verdict: "execute"}
@@ -48,23 +60,31 @@ func (e *Engine) assess(d Decision, s *Session, shortlist []ScoredScenario, path
 		weight += w
 	}
 	add("model", weightModel, 1-primary.Confidence)
-	// Retrieval speaks only to a new catalog topic. A continuation such as a
-	// bare "В Алматы, легковая" does not retrieve the scenario it continues,
-	// system intents have no examples, and an all-zero shortlist (only the
-	// forced in-play IDs) carries no opinion.
+	chosen, hedged := []string{}, []Candidate{}
+	for i, c := range d.Scenarios {
+		if i == 0 || c.Confidence >= queueConfidence {
+			chosen = append(chosen, c.ScenarioID)
+		} else {
+			hedged = append(hedged, c)
+		}
+	}
+	// An all-zero shortlist (only the forced in-play IDs) carries no opinion.
 	ranked := slices.Clone(shortlist)
 	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].Score > ranked[j].Score })
-	_, catalogued := e.Catalog.Scenarios[primary.ScenarioID]
-	if !catalogued || d.IsContinuation && e.inPlay(s, primary.ScenarioID) || len(ranked) == 0 || ranked[0].Score <= 0 {
+	if len(ranked) == 0 || ranked[0].Score <= 0 {
 		ranked = nil
 	}
-	if len(ranked) >= 2 {
-		add("retrieval_margin", weightMargin, 1-clamp01((ranked[0].Score-ranked[1].Score)/marginScale))
+	// Retrieval ranks only a new catalog topic. A continuation such as a bare
+	// "В Алматы, легковая" does not retrieve the scenario it continues, and
+	// system intents have no examples.
+	_, catalogued := e.Catalog.Scenarios[primary.ScenarioID]
+	if catalogued && !(d.IsContinuation && inPlay(s, primary.ScenarioID)) && ranked != nil {
+		if len(ranked) >= 2 {
+			add("retrieval_margin", weightMargin, 1-clamp01((ranked[0].Score-ranked[1].Score)/marginScale))
+		}
+		add("disagreement", weightDisagreement, disagreement(chosen, ranked))
 	}
-	if len(ranked) > 0 {
-		add("disagreement", weightDisagreement, disagreement(d, ranked))
-	}
-	if rule, ok := e.boundary(d, ranked); ok {
+	if rule, ok := e.boundary(d, chosen, hedged, ranked); ok {
 		add("boundary", weightBoundary, 1)
 		u.Boundary = rule
 	}
@@ -81,71 +101,55 @@ func (e *Engine) assess(d Decision, s *Session, shortlist []ScoredScenario, path
 }
 
 // inPlay reports whether a scenario already belongs to the dialog: an active,
-// suspended or queued frame, the last completed one, or a follow-up that the
-// last completed scenario's not_this_if names (quote → purchase).
-func (e *Engine) inPlay(s *Session, id string) bool {
+// suspended or queued frame, the last completed one or its follow-up.
+func inPlay(s *Session, id string) bool {
 	if s == nil {
 		return false
 	}
 	if slices.Contains(workflowIDs(s), id) {
 		return true
 	}
-	if s.LastCompleted == nil {
-		return false
-	}
-	if s.LastCompleted.ScenarioID == id {
-		return true
-	}
-	for _, rule := range e.Catalog.Scenarios[s.LastCompleted.ScenarioID].Boundaries {
-		if str(rule["use_instead"]) == id {
-			return true
-		}
-	}
-	return false
+	last := s.LastCompleted
+	return last != nil && (last.ScenarioID == id || slices.Contains(followUps[last.ScenarioID], id))
 }
 
 // disagreement is 0 when retrieval ranks a chosen scenario first, .5 when in
-// its top 3, 1 otherwise. Any chosen scenario counts: a multi-intent turn sorts
-// the urgent intent first, and retrieval over the whole utterance may rank the
-// other one higher.
-func disagreement(d Decision, ranked []ScoredScenario) float64 {
-	best := len(ranked)
-	for i, c := range ranked {
+// its top 3, 1 otherwise, including when a short shortlist omits it. Any
+// chosen scenario counts: a multi-intent turn sorts the urgent intent first,
+// and retrieval over the whole utterance may rank the other one higher.
+func disagreement(chosen []string, ranked []ScoredScenario) float64 {
+	for i, c := range ranked[:min(3, len(ranked))] {
 		if c.Score <= 0 {
 			break
 		}
-		if slices.ContainsFunc(d.Scenarios, func(x Candidate) bool { return x.ScenarioID == c.ScenarioID }) {
-			best = i
-			break
+		if slices.Contains(chosen, c.ScenarioID) {
+			if i == 0 {
+				return 0
+			}
+			return .5
 		}
-	}
-	switch {
-	case best == 0:
-		return 0
-	case best < 3:
-		return .5
 	}
 	return 1
 }
 
 // boundary returns the first not_this_if rule of the primary whose use_instead
-// scenario is live: retrieval ranks it in its top 2, or the model lists it as
-// an alternative with confidence ≥ .5. A neighbour the decision also chose is
-// not a conflict.
-func (e *Engine) boundary(d Decision, ranked []ScoredScenario) (string, bool) {
+// scenario is live: retrieval ranks it in its top 2, or the model offers it
+// with confidence ≥ .5 as an alternative or as a secondary intent too weak to
+// queue. A neighbour the decision also chose is not a conflict.
+func (e *Engine) boundary(d Decision, chosen []string, hedged []Candidate, ranked []ScoredScenario) (string, bool) {
 	live := map[string]bool{}
 	for _, c := range ranked[:min(2, len(ranked))] {
 		if c.Score > 0 {
 			live[c.ScenarioID] = true
 		}
 	}
-	for _, c := range d.Alternatives {
+	for _, c := range append(slices.Clone(d.Alternatives), hedged...) {
 		if c.Confidence >= boundaryConfidence {
 			live[c.ScenarioID] = true
 		}
 	}
-	for _, c := range d.Scenarios {
-		delete(live, c.ScenarioID)
+	for _, id := range chosen {
+		delete(live, id)
 	}
 	primary := d.Scenarios[0].ScenarioID
 	for _, rule := range e.Catalog.Scenarios[primary].Boundaries {

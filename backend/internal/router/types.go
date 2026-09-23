@@ -45,16 +45,17 @@ type Trace struct {
 	Actions    []ActionCall     `json:"actions"`
 	LatencyMS  map[string]int64 `json:"latency_ms"`
 	Error      string           `json:"error,omitempty"`
+	Proposals  []Decision       `json:"proposals,omitempty"`
 }
 type Output struct {
-	SessionID        string   `json:"session_id"`
-	RequestID        string   `json:"request_id"`
-	Answer           string   `json:"answer"`
-	Language         string   `json:"language"`
-	Status           string   `json:"status"`
-	ActiveScenario   string   `json:"active_scenario,omitempty"`
-	PendingScenarios []string `json:"pending_scenarios"`
-	Trace            Trace    `json:"trace"`
+	SessionID        string        `json:"session_id"`
+	RequestID        string        `json:"request_id"`
+	Answer           string        `json:"answer"`
+	Language         string        `json:"language"`
+	Status           string        `json:"status"`
+	ActiveScenario   string        `json:"active_scenario,omitempty"`
+	PendingScenarios []string      `json:"pending_scenarios"`
+	Trace            Trace         `json:"trace"`
 	Review           *IntentReview `json:"review,omitempty"`
 }
 type Pending struct {
@@ -74,20 +75,25 @@ type Turn struct {
 	Output *Output `json:"output,omitempty"`
 }
 type Session struct {
-	ID            string    `json:"session_id"`
-	Language      string    `json:"language"`
-	Identity      Values    `json:"identity"`
-	Active        *Frame    `json:"active,omitempty"`
-	LastCompleted *Frame    `json:"last_completed,omitempty"`
-	Stack         []*Frame  `json:"stack"`
-	Queue         []*Frame  `json:"queue"`
-	Turns         []Turn    `json:"turns"`
-	LowConfidence int       `json:"low_confidence"`
-	UpdatedAt     time.Time `json:"updated_at"`
-	Version       int64 `json:"version"`
-	TurnCount     int `json:"turn_count"`
-	PendingTurnID string `json:"pending_turn_id,omitempty"`
-	RoutingContext []Values `json:"routing_context,omitempty"`
+	ID             string                    `json:"session_id"`
+	Language       string                    `json:"language"`
+	Identity       Values                    `json:"identity"`
+	Active         *Frame                    `json:"active,omitempty"`
+	LastCompleted  *Frame                    `json:"last_completed,omitempty"`
+	Stack          []*Frame                  `json:"stack"`
+	Queue          []*Frame                  `json:"queue"`
+	Turns          []Turn                    `json:"turns"`
+	LowConfidence  int                       `json:"low_confidence"`
+	UpdatedAt      time.Time                 `json:"updated_at"`
+	Version        int64                     `json:"version"`
+	TurnCount      int                       `json:"turn_count"`
+	PendingTurnID  string                    `json:"pending_turn_id,omitempty"`
+	RoutingContext []Values                  `json:"routing_context,omitempty"`
+	ReviewReplies  map[string]UserReviewLink `json:"review_replies,omitempty"`
+}
+type UserReviewLink struct {
+	TurnRequestID string `json:"turn_request_id"`
+	InputHash     string `json:"input_hash"`
 }
 type Model interface {
 	Route(context.Context, Input, Session) (Decision, error)

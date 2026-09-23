@@ -14,7 +14,7 @@ func equalJSON(a, b any) bool {
 func explicitYes(s string) bool {
 	s = strings.NewReplacer(",", "", ".", "", "!", "", "?", "").Replace(strings.ToLower(strings.TrimSpace(s)))
 	s = strings.Join(strings.Fields(s), " ")
-	return slices.Contains([]string{"да", "да подтверждаю", "да верно", "да всё верно", "да оформляйте", "да добавляйте", "да записывайте", "подтверждаю", "согласен", "согласна", "иә", "ия", "иә тіркеңіз", "иә растаймын", "иә дұрыс", "растаймын", "мақұл", "yes", "confirm"}, s)
+	return slices.Contains([]string{"да", "да подтверждаю", "да верно", "да всё верно", "верно", "всё верно", "да правильно", "правильно", "да оформляйте", "да добавляйте", "да записывайте", "подтверждаю", "согласен", "согласна", "иә", "ия", "иә тіркеңіз", "иә растаймын", "иә дұрыс", "растаймын", "мақұл", "yes", "confirm"}, s)
 }
 func explicitNo(s string) bool {
 	return slices.Contains([]string{"нет", "отмена", "отменить", "жоқ", "бас тартамын", "no", "cancel"}, strings.Trim(strings.ToLower(strings.TrimSpace(s)), ".!?,"))

@@ -662,3 +662,40 @@ func databaseError(err error) error {
 
 var _ Repository = (*SQLite)(nil)
 var _ Lease = (*sqliteLease)(nil)
+
+// OpenHandoffs lists sessions with an open human takeover (waiting or
+// connected), for the operator queue. It is a read-only snapshot and takes
+// no session lock; Engine.OpenHandoffs sorts, filters and re-checks tickets.
+func (p *SQLite) OpenHandoffs(ctx context.Context) ([]Session, error) {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM sessions WHERE json_extract(state,'$.operator.status') IN ('waiting','connected')`)
+	if err != nil {
+		return nil, databaseError(err)
+	}
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, databaseError(err)
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return nil, databaseError(err)
+	}
+	out := make([]Session, 0, len(ids))
+	for _, id := range ids {
+		s, err := loadSession(ctx, tx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, databaseError(tx.Commit())
+}

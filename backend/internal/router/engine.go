@@ -48,7 +48,7 @@ type Policy struct {
 }
 
 func DefaultPolicy() Policy {
-	return Policy{ShortlistSize: 8, FastCandidates: 3, FastMargin: .15, FastMinScore: .3, Execute: .25, Handoff: .55, L2Margin: .2, FastTimeout: 1500 * time.Millisecond, FullTimeout: 6 * time.Second}
+	return Policy{ShortlistSize: 8, FastCandidates: 3, FastMargin: .1, FastMinScore: .3, Execute: .25, Handoff: .55, L2Margin: .2, FastTimeout: 1500 * time.Millisecond, FullTimeout: 12 * time.Second}
 }
 
 func NewEngine(c *Catalog, m Model, repo Repository) *Engine {
@@ -574,6 +574,11 @@ func (w *work) route(ctx context.Context, state Session, shortlist []ScoredScena
 		d, err := w.e.Model.Route(c, w.r.Input, state, opts)
 		tr.LatencyMS["router"] += time.Since(start).Milliseconds()
 		if err == nil {
+			// One badly extracted slot must not discard a correct scenario
+			// choice: drop it and let the workflow ask for it again.
+			if d.Slots != nil {
+				w.e.Catalog.sanitizeSlots(d.Slots)
+			}
 			err = w.e.validateDecision(d)
 		}
 		return d, err

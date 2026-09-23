@@ -286,6 +286,7 @@ func (w *work) generate() error {
 	}
 	start := time.Now()
 	answer, err := w.e.Model.Respond(w.ctx, w.s.Language, w.r.AnswerFacts)
+	answer = maskAnswer(answer)
 	w.r.Output.Trace.LatencyMS["response"] += time.Since(start).Milliseconds()
 	w.afterModel()
 	w.r.Output.Trace.ResponseSource = "llm"

@@ -52,9 +52,9 @@ func TestAssess(t *testing.T) {
 		{name: "confident agreement with clear favourite", d: routed("SC17", .95), shortlist: ranking("SC17", .8, "SC05", .3), path: "full",
 			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}},
 		{name: "confident, disagrees, neighbour ranked first", d: routed("SC17", .95), shortlist: ranking("SC19", .7, "SC17", .6, "SC05", .2), path: "full",
-			verdict: "clarify", keys: []string{"model", "retrieval_margin", "disagreement", "boundary"}, boundary: "SC17→SC19: Client disagrees with the decision or the amount"},
+			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}, boundary: ""},
 		{name: "confident, outside top 3, neighbour clear favourite", d: routed("SC17", .95), shortlist: ranking("SC19", .9, "SC05", .3, "SC06", .2, "SC07", .1), path: "full",
-			verdict: "clarify", keys: []string{"model", "retrieval_margin", "disagreement", "boundary"}, boundary: "SC17→SC19: Client disagrees with the decision or the amount"},
+			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}, boundary: ""},
 		{name: "confident, disagrees, no boundary: paraphrase", d: routed("SC17", .95), shortlist: ranking("SC05", .7, "SC06", .3, "SC07", .2), path: "full",
 			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}},
 		{name: "absent from single-entry shortlist", d: routed("SC33", .8), shortlist: ranking("SC05", .7), path: "full",
@@ -68,7 +68,7 @@ func TestAssess(t *testing.T) {
 		{name: "confident, disagrees with split shortlist", d: routed("SC17", .95), shortlist: ranking("SC05", .5, "SC06", .5, "SC07", .5), path: "full",
 			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}},
 		{name: "confident agreement, neighbour second but far", d: routed("SC17", .95), shortlist: ranking("SC17", .8, "SC19", .4), path: "full",
-			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement", "boundary"}, boundary: "SC17→SC19: Client disagrees with the decision or the amount"},
+			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}, boundary: ""},
 		{name: "medium confidence despite agreement", d: routed("SC29", .6), shortlist: ranking("SC29", .9, "SC06", .1), path: "full",
 			verdict: "clarify", keys: []string{"model", "retrieval_margin", "disagreement"}},
 		{name: "medium confidence, empty shortlist", d: routed("SC29", .6), shortlist: nil, path: "full",
@@ -95,15 +95,15 @@ func TestAssess(t *testing.T) {
 		{name: "continuation of last completed itself", d: cont(routed("SC05", .95)), s: &Session{LastCompleted: &Frame{ScenarioID: "SC05"}}, shortlist: ranking("SC33", .8, "SC06", .6), path: "full",
 			verdict: "execute", keys: []string{"model"}},
 		{name: "last completed boundary neighbour is not a follow-up", d: cont(routed("SC19", .95)), s: &Session{LastCompleted: &Frame{ScenarioID: "SC17"}}, shortlist: ranking("SC17", .8, "SC19", .6), path: "full",
-			verdict: "clarify", keys: []string{"model", "retrieval_margin", "disagreement", "boundary"}, boundary: "SC19→SC17: Client only asks the status"},
+			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}, boundary: ""},
 		{name: "accident to victim claim is not a follow-up", d: cont(routed("SC12", .95)), s: &Session{LastCompleted: &Frame{ScenarioID: "SC11"}}, shortlist: ranking("SC11", .8, "SC12", .6), path: "full",
-			verdict: "clarify", keys: []string{"model", "retrieval_margin", "disagreement", "boundary"}, boundary: "SC12→SC11: Accident is happening right now"},
+			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}, boundary: ""},
 		{name: "continuation flag on a new scenario is a new topic", d: cont(routed("SC17", .95)), s: active, shortlist: ranking("SC19", .7, "SC17", .6), path: "full",
-			verdict: "clarify", keys: []string{"model", "retrieval_margin", "disagreement", "boundary"}, boundary: "SC17→SC19: Client disagrees with the decision or the amount"},
+			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}, boundary: ""},
 		{name: "continuation still checks model alternatives", d: cont(routed("SC01", .95, Candidate{ScenarioID: "SC02", Confidence: .6})), s: active, shortlist: ranking("SC05", .8), path: "full",
 			verdict: "clarify", keys: []string{"model", "boundary"}, boundary: "SC01→SC02: Client already decided and asks to issue or buy the policy"},
 		{name: "continuation still checks boundary neighbour in shortlist", d: cont(routed("SC01", .95)), s: active, shortlist: ranking("SC02", .8, "SC01", .2), path: "full",
-			verdict: "clarify", keys: []string{"model", "boundary"}, boundary: "SC01→SC02: Client already decided and asks to issue or buy the policy"},
+			verdict: "execute", keys: []string{"model"}, boundary: ""},
 		{name: "continuation ignores neighbour ranked third", d: cont(routed("SC01", .95)), s: active, shortlist: ranking("SC01", .2, "SC33", .16, "SC02", .1), path: "full",
 			verdict: "execute", keys: []string{"model"}},
 
@@ -121,9 +121,9 @@ func TestAssess(t *testing.T) {
 		{name: "neighbour chosen too is not a conflict", d: both, shortlist: ranking("SC19", .7, "SC17", .6), path: "full",
 			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}},
 		{name: "weak secondary neighbour stays live in shortlist", d: hedge(.2), shortlist: ranking("SC19", .7, "SC17", .6, "SC05", .2), path: "full",
-			verdict: "clarify", keys: []string{"model", "retrieval_margin", "disagreement", "boundary"}, boundary: "SC17→SC19: Client disagrees with the decision or the amount"},
+			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}, boundary: ""},
 		{name: "weak secondary does not settle disagreement", d: hedge(.2), shortlist: ranking("SC19", .9, "SC05", .3, "SC06", .2, "SC07", .1), path: "full",
-			verdict: "clarify", keys: []string{"model", "retrieval_margin", "disagreement", "boundary"}, boundary: "SC17→SC19: Client disagrees with the decision or the amount"},
+			verdict: "execute", keys: []string{"model", "retrieval_margin", "disagreement"}, boundary: ""},
 		{name: "hedged secondary neighbour acts as alternative", d: hedge(.6), shortlist: nil, path: "full",
 			verdict: "clarify", keys: []string{"model", "boundary"}, boundary: "SC17→SC19: Client disagrees with the decision or the amount"},
 		{name: "secondary at queue bar is chosen", d: hedge(.75), shortlist: ranking("SC19", .7, "SC17", .6), path: "full",
@@ -169,12 +169,14 @@ func TestAssess(t *testing.T) {
 func TestAssessComponentValues(t *testing.T) {
 	e := assessEngine(t)
 	u := e.assess(routed("SC17", .95), &Session{}, ranking("SC19", .7, "SC17", .6, "SC05", .2), "full")
-	want := map[string]float64{"model": .05, "retrieval_margin": .667, "disagreement": .5, "boundary": 1}
+	// Retrieval preferring the look-alike SC19 no longer flags a boundary; only
+	// the model's own alternatives do.
+	want := map[string]float64{"model": .05, "retrieval_margin": .667, "disagreement": .5}
 	if !maps.Equal(u.Components, want) {
 		t.Fatalf("components %v, want %v", u.Components, want)
 	}
-	// (1·.05 + .08·.667 + .12·.5 + .3·1) / 1.5
-	if u.Score != .309 {
+	// (1·.05 + .08·.667 + .12·.5) / 1.2
+	if u.Score != .136 {
 		t.Fatalf("score %v", u.Score)
 	}
 	if u := e.assess(routed("SC17", .95), &Session{}, ranking("SC05", .9, "SC06", .1, "SC07", .05, "SC08", .01), "full"); u.Components["disagreement"] != 1 || u.Components["retrieval_margin"] != 0 {
@@ -194,8 +196,8 @@ func TestAssessComponentValues(t *testing.T) {
 	}
 	hedged := routed("SC17", .95)
 	hedged.Scenarios = append(hedged.Scenarios, Candidate{ScenarioID: "SC19", Confidence: .2})
-	if u := e.assess(hedged, &Session{}, ranking("SC19", .7, "SC17", .6, "SC05", .2), "full"); u.Score != .309 {
-		t.Fatalf("weak secondary neighbour scored %v, want the plain decision's .309", u.Score)
+	if u := e.assess(hedged, &Session{}, ranking("SC19", .7, "SC17", .6, "SC05", .2), "full"); u.Score != .136 {
+		t.Fatalf("weak secondary neighbour scored %v, want the plain decision's .136", u.Score)
 	}
 	u = e.assess(routed("SC01", .2), &Session{}, nil, "bypass")
 	if u.Score != 0 || u.Verdict != "execute" || u.Boundary != "" || !maps.Equal(u.Components, map[string]float64{"bypass": 0}) {

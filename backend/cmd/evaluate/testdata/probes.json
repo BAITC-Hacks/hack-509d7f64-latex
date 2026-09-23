@@ -1,0 +1,167 @@
+{
+  "meta": {
+    "description": "Jury-style probes for the harness: simple requests, topic switches with return, mixed ru/kk inside one phrase, scenario boundaries from scenarios.json not_this_if, Kazakh. Test inputs only; the router never reads this file.",
+    "labels": "Expected scenarios follow scenarios.json descriptions and not_this_if rules; each note names the boundary the probe sits on.",
+    "as_of_date": "2026-10-01"
+  },
+  "probes": [
+    {
+      "id": "P01",
+      "category": "simple",
+      "tags": ["ru"],
+      "note": "Office address and hours; SC33.",
+      "turns": [
+        {"text": "Подскажите, в Караганде есть ваше отделение и до скольки оно сегодня открыто?", "lang": "ru", "expected": ["SC33"]}
+      ]
+    },
+    {
+      "id": "P02",
+      "category": "simple",
+      "tags": ["kazakh"],
+      "note": "Why OGPO got more expensive, bonus-malus class; SC32, not a new quote (SC01 not_this_if).",
+      "turns": [
+        {"text": "Биыл міндетті сақтандыру неге қымбаттап кетті? Бонус-малус сыныбым төмендеп кетті ме?", "lang": "kk", "expected": ["SC32"]}
+      ]
+    },
+    {
+      "id": "P03",
+      "category": "boundary",
+      "tags": ["SC17|SC19"],
+      "note": "Approved payout but the amount is disputed; SC19 (SC17 not_this_if: disagrees with the amount).",
+      "turns": [
+        {"text": "Выплату по каско мне одобрили, но пришло вдвое меньше, чем стоит ремонт. Я с этим не согласен.", "lang": "ru", "expected": ["SC19"]}
+      ]
+    },
+    {
+      "id": "P04",
+      "category": "boundary",
+      "tags": ["SC17|SC19"],
+      "note": "Only asks where the claim is and whether money was sent; SC17 (SC19 not_this_if: only asks the status).",
+      "turns": [
+        {"text": "Заявление по заливу подавала две недели назад — его уже рассмотрели, деньги отправили?", "lang": "ru", "expected": ["SC17"]}
+      ]
+    },
+    {
+      "id": "P05",
+      "category": "boundary",
+      "tags": ["SC11|SC12|SC13"],
+      "note": "Past accident, other driver at fault and insured by Saqta under OGPO; SC12, not SC11 (not now) or SC13 (not own CASCO).",
+      "turns": [
+        {"text": "Позавчера в меня въехало такси, водитель признал вину, его ОГПО оформлено у вас. Как мне получить компенсацию?", "lang": "ru", "expected": ["SC12"]}
+      ]
+    },
+    {
+      "id": "P06",
+      "category": "boundary",
+      "tags": ["SC11|SC12|SC13"],
+      "note": "Client at fault yesterday, own CASCO; SC13 (SC12 not_this_if: client was at fault or claims under own CASCO).",
+      "turns": [
+        {"text": "Вчера сам не вписался в поворот и помял бампер о столб, машина застрахована у вас по каско.", "lang": "ru", "expected": ["SC13"]}
+      ]
+    },
+    {
+      "id": "P07",
+      "category": "boundary",
+      "tags": ["SC11|SC12|SC13", "urgent"],
+      "note": "Accident happening right now with an injured passenger; SC11 (urgent).",
+      "turns": [
+        {"text": "Мы прямо сейчас стоим на Аль-Фараби после столкновения, у пассажира болит шея, что делать?", "lang": "ru", "expected": ["SC11"]}
+      ]
+    },
+    {
+      "id": "P08",
+      "category": "boundary",
+      "tags": ["kazakh", "SC06|SC15", "urgent"],
+      "note": "Already abroad and the child is ill; SC15, not buying travel insurance (SC06 not_this_if).",
+      "turns": [
+        {"text": "Қазір Анталияда демалып жүрміз, балам қатты ауырып қалды, сақтандыруды сіздерден алғанбыз.", "lang": "kk", "expected": ["SC15"]}
+      ]
+    },
+    {
+      "id": "P09",
+      "category": "mixed",
+      "tags": ["SC26|SC30"],
+      "note": "ru/kk inside one phrase: money charged but the app says the policy was not issued; SC30 (SC26 not_this_if).",
+      "turns": [
+        {"text": "Сәлеметсіз бе, деньги с карты списались, бірақ қосымшада полис рәсімделмеді деп тұр.", "lang": "mixed", "expected": ["SC30"]}
+      ]
+    },
+    {
+      "id": "P10",
+      "category": "mixed",
+      "tags": ["SC03|SC40"],
+      "note": "kk/ru inside one phrase: what a CASCO deductible means; SC40 terms explanation, not a CASCO quote.",
+      "turns": [
+        {"text": "Каско бойынша франшиза деген не, объясните простыми словами, пожалуйста.", "lang": "mixed", "expected": ["SC40"]}
+      ]
+    },
+    {
+      "id": "P11",
+      "category": "mixed",
+      "tags": ["SC24|SC34"],
+      "note": "kk/ru inside one phrase: the app works but the DMS card is missing; SC24 (SC34 not_this_if).",
+      "turns": [
+        {"text": "Қосымша жақсы жұмыс істейді, но карточку ДМС нигде не вижу, а клиника сұрап жатыр.", "lang": "mixed", "expected": ["SC24"]}
+      ]
+    },
+    {
+      "id": "P12",
+      "category": "boundary",
+      "tags": ["SC25|SC38"],
+      "note": "Suspicious call claiming the policy was cancelled; SC38 (SC25 not_this_if).",
+      "turns": [
+        {"text": "Мне позвонили якобы из Saqta и сказали, что мой полис аннулирован и нужно срочно доплатить. Это правда?", "lang": "ru", "expected": ["SC38"]}
+      ]
+    },
+    {
+      "id": "P13",
+      "category": "boundary",
+      "tags": ["kazakh", "SC05|SC28"],
+      "note": "Sold the old car, bought a new one, keeps the policy; SC05 (SC28 not_this_if: replaces the car and keeps the policy).",
+      "turns": [
+        {"text": "Ескі көлігімді сатып, жаңасын алдым, сақтандыруды жаңа көлікке көшіргім келеді.", "lang": "kk", "expected": ["SC05"]}
+      ]
+    },
+    {
+      "id": "P14",
+      "category": "boundary",
+      "tags": ["SC36|SC37"],
+      "note": "Mentions a live specialist but wants a call later; SC36 (SC37 not_this_if: wants to be called later).",
+      "turns": [
+        {"text": "Сейчас неудобно говорить, пусть живой специалист перезвонит мне завтра в десять утра.", "lang": "ru", "expected": ["SC36"]}
+      ]
+    },
+    {
+      "id": "P15",
+      "category": "multi_intent",
+      "tags": ["SC26|SC30"],
+      "note": "Brief-style run-on: paid, charged, policy not issued, then change email; SC30 then SC29.",
+      "turns": [
+        {"text": "Здравствуйте, я вчера оплатил ОГПО, деньги списались, а полис так и не оформился… а, и ещё, почту в профиле поменять надо.", "lang": "ru", "expected": ["SC30", "SC29"]}
+      ]
+    },
+    {
+      "id": "P16",
+      "category": "topic_switch",
+      "tags": ["context_return", "irreversible_action"],
+      "note": "Renewal interrupted by an installments question while the renewal waits for identification, then return; C007's CASCO expires 2026-10-20. A qualified 'no' after the preview must not execute renew_policy.",
+      "turns": [
+        {"text": "Хочу продлить свою страховку на машину.", "lang": "ru", "expected": ["SC27"]},
+        {"text": "Подождите, а продление можно оплатить в рассрочку?", "lang": "ru", "expected": ["SC31"], "tags": ["switch_turn"]},
+        {"text": "Понятно. Тогда вернёмся к продлению, телефон плюс 7 701 000 00 07.", "lang": "ru", "expected": ["SC27"], "tags": ["return_turn"]},
+        {"text": "Нет, пока не надо, я сначала посоветуюсь с женой.", "lang": "ru", "expected": ["SC27"]}
+      ]
+    },
+    {
+      "id": "P17",
+      "category": "topic_switch",
+      "tags": ["kazakh", "context_return"],
+      "note": "Kazakh: claim status interrupted by an office-hours question, then return with the claim number (CL-500311 belongs to C004).",
+      "turns": [
+        {"text": "Сәлеметсіз бе, өтінішім бойынша ақша қашан түсетінін білгім келеді.", "lang": "kk", "expected": ["SC17"]},
+        {"text": "Айтпақшы, Алматыдағы кеңселеріңіз сенбі күні жұмыс істей ме?", "lang": "kk", "expected": ["SC33"], "tags": ["switch_turn"]},
+        {"text": "Жақсы. Енді өтінішке қайта оралайық, нөмірі CL-500311.", "lang": "kk", "expected": ["SC17"], "tags": ["return_turn"]}
+      ]
+    }
+  ]
+}

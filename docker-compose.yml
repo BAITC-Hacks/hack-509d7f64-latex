@@ -11,6 +11,7 @@ services:
       context: .
       dockerfile: docker/router.Dockerfile
     image: voice-samurai/router
+    pull_policy: build                             # local-only image: always build, never try Docker Hub
     ports: ["${ROUTER_PORT:-8080}:8080"]              # host port; ROUTER_PORT=18080 if 8080 is taken (the chat reaches it in-network)
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -32,6 +33,7 @@ services:
       args:
         TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
     image: voice-samurai/stt
+    pull_policy: build                             # local-only image: always build, never try Docker Hub
     ports: ["9100:9100"]
     volumes: ["speech-models:/models"]
     environment:
@@ -47,6 +49,7 @@ services:
       args:
         TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cpu}
     image: voice-samurai/tts
+    pull_policy: build                             # local-only image: always build, never try Docker Hub
     ports: ["9101:9101"]
     volumes: ["speech-models:/models"]
     environment:
@@ -59,6 +62,7 @@ services:
       context: .
       dockerfile: docker/chat.Dockerfile
     image: voice-samurai/chat
+    pull_policy: build                             # local-only image: always build, never try Docker Hub
     ports: ["9102:9102"]
     environment:
       ROUTER_URL: ${ROUTER_URL:-http://router:8080/v1/turns}   # Go router; http://host.docker.internal:8080/v1/turns for one on the host

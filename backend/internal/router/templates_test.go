@@ -321,6 +321,9 @@ func TestTemplateEveryAllowlistedScenarioEndToEnd(t *testing.T) {
 					o = process(t, e, in)
 				}
 				if o.Status != "completed" || o.Trace.ResponseSource != "template" {
+					if o.Trace.Uncertainty != nil {
+						t.Logf("uncertainty %+v shortlist %v", *o.Trace.Uncertainty, o.Trace.Shortlist)
+					}
 					t.Fatalf("%s %s: %q (%s, %s, %s)", id, lang, o.Answer, o.Status, o.Trace.ResponseSource, o.Trace.Error)
 				}
 				// Every fixed fragment of this language's closing is in the answer.

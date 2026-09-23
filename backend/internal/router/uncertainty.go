@@ -29,6 +29,9 @@ const (
 	// boundaryConfidence is the alternative confidence at which the model itself
 	// treats a boundary neighbour as live.
 	boundaryConfidence = .5
+	// retrievalFloor is the top retrieval score below which the shortlist is
+	// treated as no evidence; real topic matches score from about .14 up.
+	retrievalFloor = .1
 	// queueConfidence mirrors the engine's bar for queueing a secondary intent
 	// (workflow_helpers.go): a secondary below it is dropped, so it counts as
 	// an alternative, not as a choice that settles a disagreement or boundary.
@@ -71,7 +74,9 @@ func (e *Engine) assess(d Decision, s *Session, shortlist []ScoredScenario, path
 	// An all-zero shortlist (only the forced in-play IDs) carries no opinion.
 	ranked := slices.Clone(shortlist)
 	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].Score > ranked[j].Score })
-	if len(ranked) == 0 || ranked[0].Score <= 0 {
+	// Neither does one whose leader is below retrievalFloor: text the catalog
+	// barely explains ("запрос клиента", "иә") scores near zero everywhere.
+	if len(ranked) == 0 || ranked[0].Score < retrievalFloor {
 		ranked = nil
 	}
 	// Retrieval ranks only a new catalog topic. A continuation such as a bare
@@ -133,16 +138,15 @@ func disagreement(chosen []string, ranked []ScoredScenario) float64 {
 }
 
 // boundary returns the first not_this_if rule of the primary whose use_instead
-// scenario is live: retrieval ranks it in its top 2, or the model offers it
-// with confidence ≥ .5 as an alternative or as a secondary intent too weak to
-// queue. A neighbour the decision also chose is not a conflict.
+// scenario is live: the model offers it with confidence ≥ .5 as an alternative
+// or as a secondary intent too weak to queue. A neighbour the decision also
+// chose is not a conflict.
 func (e *Engine) boundary(d Decision, chosen []string, hedged []Candidate, ranked []ScoredScenario) (string, bool) {
 	live := map[string]bool{}
-	for _, c := range ranked[:min(2, len(ranked))] {
-		if c.Score > 0 {
-			live[c.ScenarioID] = true
-		}
-	}
+	// Only the model's own alternatives make a neighbour live: lexical
+	// retrieval ranks look-alike scenarios (quote vs purchase) above the right
+	// one too often (dev r@1 ≈ .72) to veto a confident choice; it still
+	// counts through the disagreement component.
 	for _, c := range append(slices.Clone(d.Alternatives), hedged...) {
 		if c.Confidence >= boundaryConfidence {
 			live[c.ScenarioID] = true

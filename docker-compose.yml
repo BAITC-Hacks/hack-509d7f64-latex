@@ -16,7 +16,10 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1-mini}
       API_TOKEN: ${API_TOKEN:-}                    # optional bearer token; the chat sends it as ROUTER_TOKEN
+      OPENAI_FAST_MODEL: ${OPENAI_FAST_MODEL:-gpt-4.1-nano}
       LISTEN_ADDR: 0.0.0.0:8080
+      DB_PATH: /data/voice_router.db
+    volumes: ["router-data:/data"]              # SQLite: sessions, turns, seeded mock backend
     restart: unless-stopped
 
   stt:
@@ -69,5 +72,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  router-data:
   speech-models:
     name: speech-models                            # fixed name, so the downloaded weights survive renaming the checkout

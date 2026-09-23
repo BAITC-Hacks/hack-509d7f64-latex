@@ -6,13 +6,17 @@ COPY voice_router_dataset/ voice_router_dataset/
 COPY backend/ backend/
 WORKDIR /src/backend
 ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags='-s -w' -o /out/voice-router ./cmd/router
+RUN go build -trimpath -ldflags='-s -w' -o /out/voice-router ./cmd/router && \
+    go build -trimpath -ldflags='-s -w' -o /out/voice-router-migrate ./cmd/migrate
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates && adduser -D -H app && mkdir -p /data && chown app /data
-COPY --from=build /out/voice-router /usr/local/bin/voice-router
+COPY --from=build /out/voice-router /out/voice-router-migrate /usr/local/bin/
 ENV LISTEN_ADDR=0.0.0.0:8080 DB_PATH=/data/voice_router.db
-# SQLite state (sessions, turns, seeded mock backend) lives on this volume.
+# SQLite state (sessions, turns, seeded mock backend) lives on this volume. The
+# router migrates and seeds it on first start; for demos:
+#   docker compose exec router voice-router-migrate              # counts per mock_* view
+#   docker compose exec router voice-router-migrate -reset-data  # re-seed from the dataset
 VOLUME /data
 WORKDIR /data
 EXPOSE 8080

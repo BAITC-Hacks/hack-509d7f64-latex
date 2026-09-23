@@ -251,9 +251,16 @@ func TestSQLitePragmasAndConcurrentMigration(t *testing.T) {
 	if err = p.db.QueryRow(`PRAGMA synchronous`).Scan(&synchronous); err != nil || synchronous != 1 {
 		t.Fatal("synchronous is not NORMAL", synchronous, err)
 	}
-	var versions int
-	if err = p.db.QueryRow(`SELECT count(*) FROM router_schema_migrations`).Scan(&versions); err != nil || versions != 1 {
-		t.Fatal("migration applied more than once", versions, err)
+	ms, err := migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var versions, states int
+	if err = p.db.QueryRow(`SELECT count(*) FROM router_schema_migrations`).Scan(&versions); err != nil || versions != len(ms) {
+		t.Fatal("migration applied more than once", versions, len(ms), err)
+	}
+	if err = p.db.QueryRow(`SELECT count(*) FROM mock_backend_state`).Scan(&states); err != nil || states != 1 {
+		t.Fatal("mock backend seeded more than once", states, err)
 	}
 	if _, err = p.db.Exec(`INSERT INTO turns(session_id, request_id, input_fingerprint, input, phase, checkpoint) VALUES('missing','r','h','{}','received','{}')`); !errors.Is(databaseError(err), ErrDatabase) {
 		t.Fatal("foreign key not enforced", err)

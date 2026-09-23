@@ -69,29 +69,40 @@ the gateway and its router contract in `chat/README.md`.
 
 ### Run the Go router
 
-Requires Go 1.25+, PostgreSQL (development baseline: 17), and an OpenAI API key.
-Create an empty `voice_router` database using your PostgreSQL installation, then
-run from the repository root in PowerShell:
+Requires Go 1.25+ and an OpenAI API key. State lives in one SQLite file (pure-Go
+driver: no cgo, no database server). From `backend/`:
 
-```powershell
-cd backend
-$env:DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5432/voice_router?sslmode=disable"
-go run ./cmd/migrate
-$env:OPENAI_API_KEY = "your-key"
-$env:OPENAI_MODEL = "gpt-4.1-mini" # optional
-$env:API_TOKEN = "your-user-client-token" # optional for local development
-$env:OPERATOR_API_TOKEN = "a-different-operator-token" # required for operator review
-go run ./cmd/router
+```bash
+go run ./cmd/migrate                      # optional: the router applies the same migrations at startup
+OPENAI_API_KEY=... go run ./cmd/router
 ```
 
-Use your database credentials in `DATABASE_URL`. Migration creates the schema
-and seeds mock records once; re-running it preserves subsequent mutations.
-Server startup checks database connectivity and schema readiness and fails if
-migration is needed. There is no in-memory production fallback.
+`DB_PATH` (default `voice_router.db`, relative to the working directory) selects
+the file. The migrations are embedded in the binary, applied in order and
+recorded in `router_schema_migrations`:
+
+| Version | File (`backend/internal/router/migrations/`) | Effect |
+|---|---|---|
+| 001 | `001_durable_router.sql` | sessions, turns, events, reviews, tool receipts, `mock_backend_state` |
+| 002 | `002_seed_mock_backend.sql` | seeds the synthetic backend (clients, policies, claims, payments) once from the embedded `voice_router_dataset/mock_backend.json` and records its SHA-256; restarts never reseed, so tool mutations persist |
+| 003 | `003_mock_backend_views.sql` | read-only views `mock_clients`, `mock_policies`, `mock_claims`, `mock_payments`, `mock_records` over the stored JSON |
+
+`cmd/migrate` prints the applied migrations and each view's row count next to
+the dataset's count. For repeatable demos:
+
+```bash
+go run ./cmd/migrate -reset-data    # re-seed the mock backend and restart generated IDs; sessions and turns stay
+go run ./cmd/migrate -reset-all     # also delete sessions, turns, events, reviews, receipts (stop the router first)
+sqlite3 -readonly -header -column voice_router.db 'SELECT policy_number, client_id, product, status FROM mock_policies'
+```
+
+In Docker the router seeds the `router-data` volume on first start, and the
+image ships the same command: `docker compose exec router voice-router-migrate -reset-data`.
 
 The default address is `http://127.0.0.1:8080`; set `LISTEN_ADDR` to override it.
-`backend/.env.example` lists the configuration. `.env` files are **not loaded
-automatically**. API credentials stay on the server. Build a binary with
+`backend/.env.example` lists the configuration; `cmd/router` and `cmd/migrate`
+load `backend/.env` when present, and variables already set win. API
+credentials stay on the server. Build a binary with
 `go build -o voice-router.exe ./cmd/router` from `backend/`.
 
 ## Logical components and durable execution
@@ -349,8 +360,9 @@ and workflow progression for diagnosis.
 
 All 31 catalog actions use the supplied mock business records and knowledge
 base. The fixture reference date is **2026-10-01**. Mutable mock records and ID
-allocation live in PostgreSQL, initially seeded from the dataset. A locked
-JSONB backend-state row provides transactional updates for this small dataset.
+allocation live in SQLite as one JSON document (`mock_backend_state`), seeded
+from the dataset by migration 002. Each tool call reads and rewrites it inside
+its own write transaction; the read-only `mock_*` views expose it to `sqlite3`.
 
 The chat frontend displays the returned scenarios and trace (`chat/README.md`
 describes how the gateway maps them). Manual operator overrides and actual

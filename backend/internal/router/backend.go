@@ -19,7 +19,7 @@ type Backend struct {
 }
 
 func NewBackend(c *Catalog) *Backend {
-	return &Backend{c: c, data: clone(c.Seed), receipts: map[string]Values{}, seq: 900000}
+	return &Backend{c: c, data: clone(c.Seed), receipts: map[string]Values{}, seq: mockSequenceStart}
 }
 func failure(code, msg string) Values { return Values{"error": Values{"code": code, "message": msg}} }
 func errorCode(v Values) string       { return str(asMap(v["error"])["code"]) }

@@ -28,7 +28,7 @@ var migrationFiles embed.FS
 // the file lock inside the process, and a ":memory:" database stays alive.
 // busy_timeout covers other processes such as cmd/migrate. A Backend is
 // constructed only inside a tool transaction, from the stored row; it is never
-// shared across turns.
+// shared across turns. mock_seed.go seeds, resets and inspects that row.
 type SQLite struct {
 	db      *sql.DB
 	catalog *Catalog
@@ -111,11 +111,13 @@ func (p *SQLite) Close() {
 
 type migration struct {
 	version int
+	name    string
 	sql     string
 }
 
-// migrations returns the embedded files in name order; names start with a
-// zero-padded version number.
+// migrations returns the embedded files in name order. A name is a
+// zero-padded version number, an underscore and a label, e.g.
+// 002_seed_mock_backend.sql; versions strictly increase.
 func migrations() ([]migration, error) {
 	entries, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
@@ -123,16 +125,20 @@ func migrations() ([]migration, error) {
 	}
 	var out []migration
 	for _, entry := range entries {
-		name := entry.Name()
-		version, err := strconv.Atoi(strings.SplitN(name, "_", 2)[0])
+		file := entry.Name()
+		number, label, _ := strings.Cut(strings.TrimSuffix(file, ".sql"), "_")
+		version, err := strconv.Atoi(number)
 		if err != nil {
-			return nil, fmt.Errorf("migration %s: %w", name, err)
+			return nil, fmt.Errorf("migration %s: %w", file, err)
 		}
-		b, err := migrationFiles.ReadFile("migrations/" + name)
+		if len(out) > 0 && version <= out[len(out)-1].version {
+			return nil, fmt.Errorf("migration %s: version %d is not greater than %d", file, version, out[len(out)-1].version)
+		}
+		b, err := migrationFiles.ReadFile("migrations/" + file)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, migration{version, string(b)})
+		out = append(out, migration{version, label, string(b)})
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no migrations embedded")
@@ -140,11 +146,17 @@ func migrations() ([]migration, error) {
 	return out, nil
 }
 
-// Migrate applies pending migrations and seeds the synthetic backend once; a
-// later call never overwrites mutated business records. BEGIN IMMEDIATE
-// serializes concurrent migrators on the same file.
+// Migrate applies pending migrations in version order, each recorded in
+// router_schema_migrations. Migration 002 seeds the synthetic backend from the
+// embedded dataset, so it runs once and a later call never overwrites mutated
+// business records. Every migration is executed with the named parameters of
+// seedArgs. BEGIN IMMEDIATE serializes concurrent migrators on the same file.
 func (p *SQLite) Migrate(ctx context.Context) error {
 	ms, err := migrations()
+	if err != nil {
+		return err
+	}
+	args, err := p.seedArgs(time.Now())
 	if err != nil {
 		return err
 	}
@@ -164,19 +176,12 @@ func (p *SQLite) Migrate(ctx context.Context) error {
 		if exists {
 			continue
 		}
-		if _, err = tx.ExecContext(ctx, m.sql); err != nil {
-			return databaseError(err)
+		if _, err = tx.ExecContext(ctx, m.sql, args...); err != nil {
+			return fmt.Errorf("migration %03d_%s: %w", m.version, m.name, databaseError(err))
 		}
 		if _, err = tx.ExecContext(ctx, `INSERT INTO router_schema_migrations(version) VALUES(?)`, m.version); err != nil {
 			return databaseError(err)
 		}
-	}
-	seed, err := json.Marshal(p.catalog.Seed)
-	if err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO mock_backend_state(id, data, sequence, updated_at) VALUES(1, ?, 900000, ?) ON CONFLICT(id) DO NOTHING`, string(seed), stamp(time.Now())); err != nil {
-		return databaseError(err)
 	}
 	return databaseError(tx.Commit())
 }
